@@ -323,7 +323,8 @@ fn render_diffview(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
     match file {
         Some(file) => {
             let orig_title = pane_title(&orig_label, &file);
-            let changed_title = pane_title(&changed_label, &file);
+            let stats = diff_status(ctrl);
+            let changed_title = format!("{} {}", pane_title(&changed_label, &file), stats);
             if file.is_binary {
                 render_placeholder_pane(f, left[0], &orig_title, "(binary file)", ctrl);
                 render_placeholder_pane(f, left[1], &changed_title, "(binary file)", ctrl);
@@ -370,6 +371,19 @@ fn pane_title(label: &str, file: &ChangedFile) -> String {
         format!("{} · {} → {}", label, rename, file.path)
     } else {
         format!("{} · {}", label, file.path)
+    }
+}
+
+/// Compact diff-position summary shown in the changed pane's top-right title.
+fn diff_status(ctrl: &Controller<'_>) -> String {
+    if ctrl.diff_rows.is_empty() {
+        return String::new();
+    }
+    let line = format!("行 {}/{}", ctrl.diff_cursor + 1, ctrl.diff_rows.len());
+    if ctrl.hunk_count > 0 {
+        format!("{line} hunk {}/{}", ctrl.hunk_idx, ctrl.hunk_count)
+    } else {
+        line
     }
 }
 
@@ -658,25 +672,6 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
             format!("+{} -{}", file.added, file.deleted),
             Style::default().fg(Color::DarkGray),
         ));
-        if ctrl.hunk_count > 0 {
-            left.push(Span::styled(" │ ", styles::status_sep_style()));
-            left.push(Span::styled(
-                format!("hunk {}/{}", ctrl.hunk_idx, ctrl.hunk_count),
-                Style::default().fg(Color::Cyan),
-            ));
-        }
-        if !ctrl.diff_rows.is_empty() {
-            left.push(Span::styled(" │ ", styles::status_sep_style()));
-            left.push(Span::styled(
-                format!("行 {}/{}", ctrl.diff_cursor + 1, ctrl.diff_rows.len()),
-                Style::default().fg(Color::DarkGray),
-            ));
-            let pct = ((ctrl.diff_cursor + 1) * 100) / ctrl.diff_rows.len();
-            left.push(Span::styled(
-                format!(" ({pct}%)"),
-                Style::default().fg(styles::DIM),
-            ));
-        }
         if ctrl.ignore_whitespace {
             left.push(Span::styled(" │ ", styles::status_sep_style()));
             left.push(Span::styled("忽略空白", Style::default().fg(Color::Yellow)));
@@ -727,16 +722,12 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         ));
         right.push(Span::styled("│ [Esc]结束", styles::key_style()));
     } else {
-        let hints: [(&str, &str); 15] = [
+        let hints: [(&str, &str); 11] = [
             ("Tab", "焦点"),
-            ("Enter", "查看对比"),
+            ("1-4", "模式"),
             ("↑↓", "移动"),
             ("Pg", "翻页"),
-            ("1/2/3/4", "模式"),
-            ("l", "换一个 commit"),
-            ("/", "过滤"),
-            ("g", "跳转行"),
-            ("f", "搜索diff"),
+            ("g/f", "跳转/搜索"),
             ("w", "忽略空白"),
             ("s", "排序"),
             ("n/m", "hunk"),

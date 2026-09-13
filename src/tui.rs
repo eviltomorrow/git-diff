@@ -551,14 +551,13 @@ impl<'a> App<'a> {
 
         let selected_style = Style::default()
             .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-            .bg(styles::SELECTED_BG);
+            .add_modifier(Modifier::BOLD);
         let row_style = if is_selected { selected_style } else { Style::default() };
         let indent = "  ".repeat(row_depth(row));
         let width = inner.width as usize;
 
         let marker = if is_selected {
-            Span::styled("▌ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            Span::styled("▌ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
         } else {
             Span::raw("  ")
         };
@@ -569,7 +568,7 @@ impl<'a> App<'a> {
                 Line::from(vec![
                     marker,
                     Span::styled(
-                        pad_right(&truncate(&format!("{} {} 📁 {}", collapse, indent, short_name(path)), name_w), name_w),
+                        pad_right(&truncate(&format!("{}{}📁 {}", collapse, indent, short_name(path)), name_w), name_w),
                         if is_selected { row_style.fg(Color::Yellow) } else { Style::default().fg(styles::DIR_FG) },
                     ),
                     Span::raw(" "),

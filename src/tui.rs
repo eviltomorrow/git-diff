@@ -519,7 +519,7 @@ impl<'a> App<'a> {
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(2),
-                Constraint::Length(2),
+                Constraint::Length(1),
             ])
             .split(area);
         self.render_header(f, chunks[0]);
@@ -529,12 +529,7 @@ impl<'a> App<'a> {
             .split(chunks[1]);
         self.render_filelist(f, panels[0]);
         self.render_diffview(f, panels[1]);
-        let status_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(chunks[2]);
-        self.render_statusbar(f, status_rows[0]);
-        self.render_hints(f, status_rows[1]);
+        self.render_statusbar(f, chunks[2]);
         if self.overlay.is_some() {
             let (commits, cursor) = match &self.overlay {
                 Some(Overlay::CommitPicker { commits, cursor }) => (commits.clone(), *cursor),
@@ -1035,42 +1030,35 @@ impl<'a> App<'a> {
             }
             if self.fold_unchanged {
                 spans.push(Span::styled(" │ ", styles::status_sep_style()));
-                spans.push(Span::styled("折叠:开", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled("折叠", Style::default().fg(Color::Yellow)));
             }
         } else {
             spans.push(Span::styled("select a file", Style::default().fg(styles::DIM)));
         }
-        f.render_widget(Line::from(spans), area);
-    }
 
-    fn render_hints(&mut self, f: &mut Frame, area: Rect) {
-        let hints: [(&str, &str); 11] = [
-            ("Tab", "切换焦点"),
-            ("↑↓", "移动/滚动"),
-            ("PgUp/PgDn", "翻页"),
-            ("l", "commit"),
-            ("1/2/3", "模式"),
-            ("/", "过滤"),
-            ("n/N", "hunk"),
-            ("z", "折叠"),
-            ("r", "刷新"),
-            ("?", "帮助"),
-            ("q", "退出"),
-        ];
-        let mut spans: Vec<Span> = Vec::new();
+        // right-aligned hint block
+        spans.push(Span::styled(" │ ", styles::status_sep_style()));
         if let Some(f) = &self.filter {
-            // filtering mode: show the input prominently, hide the busy hints
-            spans.push(Span::styled("filter: ", styles::key_style()));
             let f = f.clone();
+            spans.push(Span::styled("filter:", styles::key_style()));
             spans.push(Span::styled(format!("{} ", f), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled("Esc", styles::key_style()));
-            spans.push(Span::styled("取消  ", Style::default().fg(styles::DIM)));
-            spans.push(Span::styled("←", styles::key_style()));
-            spans.push(Span::styled("退格", Style::default().fg(styles::DIM)));
+            spans.push(Span::styled("Esc取消", Style::default().fg(styles::DIM)));
         } else {
+            let hints: [(&str, &str); 10] = [
+                ("Tab", "焦点"),
+                ("↑↓", "移动"),
+                ("Pg", "翻页"),
+                ("l", "commit"),
+                ("1/2/3", "模式"),
+                ("/", "过滤"),
+                ("n/N", "hunk"),
+                ("z", "折叠"),
+                ("?", "帮助"),
+                ("q", "退出"),
+            ];
             for (k, d) in hints.iter() {
                 spans.push(Span::styled(format!("[{}]", k), styles::key_style()));
-                spans.push(Span::styled(format!("{}  ", d), Style::default().fg(styles::DIM)));
+                spans.push(Span::styled(format!("{} ", d), Style::default().fg(styles::DIM)));
             }
         }
         f.render_widget(Line::from(spans), area);

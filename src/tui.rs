@@ -536,18 +536,17 @@ impl<'a> App<'a> {
             .title(format!(" 变更文件 ({}) ", self.files.len()))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_fg))
-            .border_type(if is_active { BorderType::Plain } else { BorderType::Rounded });
+            .border_type(BorderType::Rounded);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
         let rows = self.visible_rows();
         if rows.is_empty() {
+            let msg = Line::from(Span::styled("(no changes)", Style::default().fg(styles::DIM)));
+            let y = inner.y + inner.height.saturating_div(2);
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "  (no changes)",
-                    Style::default().fg(styles::DIM),
-                ))),
-                Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
+                Paragraph::new(msg).alignment(ratatui::layout::Alignment::Center),
+                Rect { x: inner.x, y, width: inner.width, height: 1 },
             );
             return;
         }
@@ -752,7 +751,7 @@ impl<'a> App<'a> {
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_fg))
-            .border_type(if is_active { BorderType::Plain } else { BorderType::Rounded });
+            .border_type(BorderType::Rounded);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -823,12 +822,15 @@ impl<'a> App<'a> {
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_fg))
-            .border_type(if is_active { BorderType::Plain } else { BorderType::Rounded });
+            .border_type(BorderType::Rounded);
         let inner = block.inner(area);
         f.render_widget(block, area);
         let msg = Line::from(Span::styled(msg, Style::default().fg(styles::DIM)));
         let y = inner.y + inner.height.saturating_div(2);
-        f.render_widget(msg, Rect { x: inner.x, y, width: inner.width, height: 1 });
+        f.render_widget(
+            Paragraph::new(msg).alignment(ratatui::layout::Alignment::Center),
+            Rect { x: inner.x, y, width: inner.width, height: 1 },
+        );
     }
 
     fn render_statusbar(&mut self, f: &mut Frame, area: Rect) {

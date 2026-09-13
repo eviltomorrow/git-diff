@@ -28,7 +28,7 @@ enum Overlay {
     Help,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Focus {
     FileList,
     Diff,
@@ -1058,13 +1058,20 @@ impl<'a> App<'a> {
             ("q", "退出"),
         ];
         let mut spans: Vec<Span> = Vec::new();
-        for (k, d) in hints.iter() {
-            spans.push(Span::styled(format!("[{}]", k), styles::key_style()));
-            spans.push(Span::styled(format!("{}  ", d), Style::default().fg(styles::DIM)));
-        }
         if let Some(f) = &self.filter {
+            // filtering mode: show the input prominently, hide the busy hints
+            spans.push(Span::styled("filter: ", styles::key_style()));
             let f = f.clone();
-            spans.push(Span::styled(format!(" filter: {}", f), Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(format!("{} ", f), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled("Esc", styles::key_style()));
+            spans.push(Span::styled("取消  ", Style::default().fg(styles::DIM)));
+            spans.push(Span::styled("←", styles::key_style()));
+            spans.push(Span::styled("退格", Style::default().fg(styles::DIM)));
+        } else {
+            for (k, d) in hints.iter() {
+                spans.push(Span::styled(format!("[{}]", k), styles::key_style()));
+                spans.push(Span::styled(format!("{}  ", d), Style::default().fg(styles::DIM)));
+            }
         }
         f.render_widget(Line::from(spans), area);
     }

@@ -3,11 +3,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use ratatui::Frame;
+use ratatui::{Frame, Terminal};
 use unicode_width::UnicodeWidthStr;
 
 use crate::align::{align_rows, hunk_index, hunk_starts, plain_rows, AlignedRow, LineKind};
@@ -1391,13 +1394,24 @@ fn pad_left(s: &str, width: usize) -> String {
 pub fn run<R: GitRunner>(runner: &R, root: PathBuf, has_commits: bool) -> Result<()> {
     let facade = GitFacade::new(runner, &root);
     let mut app = App::new(facade, root, has_commits)?;
-    let mut terminal = ratatui::init();
+
+    enable_raw_mode()?;
+    // draw on the main screen buffer (no alternate screen) so the last frame
+    // stays visible after quitting
+    let stdout = std::io::stdout();
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
+
     let result = event_loop(&mut terminal, &mut app);
-    ratatui::restore();
+
+    // restore terminal but keep the screen content: leave raw mode, show cursor
+    disable_raw_mode()?;
+    let _ = execute!(std::io::stdout(), crossterm::cursor::Show);
     result
 }
 
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App<'_>) -> Result<()> {
+fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App<'_>) -> Result<()> {
     loop {
         terminal.draw(|f| app.render(f))?;
         let event = crossterm::event::read()?;

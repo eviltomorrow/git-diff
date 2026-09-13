@@ -537,6 +537,10 @@ impl<'a> Controller<'a> {
         };
     }
 
+    pub fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+    }
+
     fn cycle_sort(&mut self) {
         self.sort = match self.sort {
             SortMode::Path => SortMode::Status,

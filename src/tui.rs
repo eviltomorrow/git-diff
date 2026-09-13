@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
@@ -26,6 +26,10 @@ const LIST_RATIO: u16 = 26;
 /// [`Controller::update_viewports`] before drawing).
 pub struct App<'a> {
     ctrl: Controller<'a>,
+    /// The file-list and diff panel rects from the last render, used to map
+    /// mouse clicks onto the focused panel.
+    list_rect: Rect,
+    diff_rect: Rect,
 }
 
 impl<'a> App<'a> {
@@ -36,11 +40,29 @@ impl<'a> App<'a> {
         initial_commit: Option<String>,
     ) -> Result<Self> {
         let ctrl = Controller::new(facade, repo_path, has_commits, initial_commit)?;
-        Ok(Self { ctrl })
+        Ok(Self {
+            ctrl,
+            list_rect: Rect::default(),
+            diff_rect: Rect::default(),
+        })
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.ctrl.handle_key(key);
+    }
+
+    /// Clicking inside the file list focuses the file list; clicking inside
+    /// the diff panel focuses the diff panel (a Tab variant).
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let in_list = rect_contains(self.list_rect, mouse.column, mouse.row);
+            let in_diff = rect_contains(self.diff_rect, mouse.column, mouse.row);
+            match (in_list, in_diff) {
+                (true, _) => self.ctrl.set_focus(Focus::FileList),
+                (false, true) => self.ctrl.set_focus(Focus::Diff),
+                _ => {}
+            }
+        }
     }
 
     pub fn render(&mut self, f: &mut Frame) {
@@ -75,6 +97,8 @@ impl<'a> App<'a> {
             .max()
             .unwrap_or(0);
         self.ctrl.update_viewports(list_height, diff_height, diff_width, max_line_w);
+        self.list_rect = panels[0];
+        self.diff_rect = panels[1];
 
         render_header(f, chunks[0], &self.ctrl);
         render_filelist(f, panels[0], &mut self.ctrl);
@@ -923,6 +947,12 @@ fn render_help(f: &mut Frame, area: Rect) {
 
 // ------------------------------------------------------------- helpers
 
+/// Whether a point falls inside a rect (inclusive of top-left, exclusive of
+/// bottom-right, matching ratatui's Rect semantics).
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
 fn short_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -994,10 +1024,14 @@ pub fn run<R: GitRunner>(
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    let result = event_loop(&mut terminal, &mut app);
+    let result = (|| {
+        execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        event_loop(&mut terminal, &mut app)
+    })();
 
     // restore terminal to its original state: leave raw mode and the alternate
     // screen so the shell prompt renders normally after quitting
+    let _ = execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     disable_raw_mode()?;
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
     result
@@ -1007,14 +1041,18 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &
     loop {
         terminal.draw(|f| app.render(f))?;
         let event = crossterm::event::read()?;
-        if let Event::Key(key) = event {
-            if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE && app.ctrl.overlay.is_none() && app.ctrl.filter.is_none() {
-                break;
+        match event {
+            Event::Key(key) => {
+                if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE && app.ctrl.overlay.is_none() && app.ctrl.filter.is_none() {
+                    break;
+                }
+                if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+                    break;
+                }
+                app.handle_key(key);
             }
-            if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-                break;
-            }
-            app.handle_key(key);
+            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            _ => {}
         }
     }
     Ok(())
@@ -1022,7 +1060,19 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &
 
 #[cfg(test)]
 mod width_check {
+    use super::rect_contains;
+    use ratatui::layout::Rect;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn rect_contains_bounds() {
+        let r = Rect { x: 10, y: 5, width: 20, height: 10 };
+        assert!(rect_contains(r, 10, 5));
+        assert!(rect_contains(r, 29, 14));
+        assert!(!rect_contains(r, 30, 14));
+        assert!(!rect_contains(r, 10, 15));
+        assert!(!rect_contains(r, 9, 5));
+    }
 
     struct Group<'a> {
         rows: &'a [(&'a str, &'a str)],
@@ -1055,6 +1105,7 @@ mod width_check {
             Group {
                 rows: &[
                     ("Tab", "切换焦点（文件列表 / 对比区）"),
+                    ("鼠标", "点击面板直接获得焦点"),
                     ("4", "进入模式D（上次 commit 对比 / 选择 commit）"),
                     ("1 / 2 / 3 / 4", "切换比较模式 A/B/C/D"),
                     ("r", "刷新"),

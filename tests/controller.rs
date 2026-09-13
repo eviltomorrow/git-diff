@@ -179,6 +179,16 @@ fn sort_cycles_through_modes() {
 }
 
 #[test]
+fn set_focus_switches_panels() {
+    let mut ctrl = setup();
+    assert_eq!(ctrl.focus, Focus::FileList);
+    ctrl.set_focus(Focus::Diff);
+    assert_eq!(ctrl.focus, Focus::Diff);
+    ctrl.set_focus(Focus::FileList);
+    assert_eq!(ctrl.focus, Focus::FileList);
+}
+
+#[test]
 fn collapse_all_then_expand_all() {
     let mut ctrl = setup_nested();
     // dirs visible initially: src, src/deep, top.rs

@@ -998,57 +998,104 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
     }
 
     fn render_help(&mut self, f: &mut Frame, area: Rect) {
-        const KEY_GAP: usize = 4;
-        let help_lines = [
-            ("Tab", "切换焦点（文件列表 / 对比区）"),
-            ("文件列表焦点:", "操作变更文件列表"),
-            ("↑↓", "移动光标"),
-            ("→ / ←", "展开 / 折叠目录"),
-            ("PgUp/PgDn", "列表翻页"),
-            ("对比区焦点:", "操作对比视图"),
-            ("↑↓", "逐行滚动对比区"),
-            ("PgUp/PgDn", "按页滚动对比区"),
-            ("→ / ←", "水平滚动对比区"),
-            ("n / N", "跳转下一个/上一个 hunk"),
-            ("l", "打开 commit 选择器 (模式D)"),
-            ("1 / 2 / 3", "切换比较模式 A/B/C"),
-            ("/", "过滤文件列表"),
-            ("r", "刷新"),
-            ("?", "本帮助"),
-            ("q / Ctrl+C", "退出"),
+        const KEY_GAP: usize = 6;
+        const INNER_PAD: u16 = 2;
+        struct Group {
+            title: &'static str,
+            rows: &'static [(&'static str, &'static str)],
+        }
+        let groups = [
+            Group {
+                title: "通用",
+                rows: &[
+                    ("Tab", "切换焦点（文件列表 / 对比区）"),
+                    ("l", "打开 commit 选择器 (模式D)"),
+                    ("1 / 2 / 3", "切换比较模式 A/B/C"),
+                    ("r", "刷新"),
+                    ("?", "本帮助"),
+                    ("q / Ctrl+C", "退出"),
+                ],
+            },
+            Group {
+                title: "文件列表",
+                rows: &[
+                    ("↑↓", "移动光标"),
+                    ("→ / ←", "展开 / 折叠目录"),
+                    ("PgUp/PgDn", "列表翻页"),
+                    ("/", "过滤文件列表"),
+                ],
+            },
+            Group {
+                title: "对比区",
+                rows: &[
+                    ("↑↓", "逐行滚动"),
+                    ("PgUp/PgDn", "按页滚动"),
+                    ("→ / ←", "水平滚动"),
+                    ("n / N", "跳转 hunk"),
+                ],
+            },
         ];
-        let key_w = help_lines
+        let key_w = groups
             .iter()
+            .flat_map(|g| g.rows.iter())
             .map(|(k, _)| UnicodeWidthStr::width(*k))
             .max()
             .unwrap_or(0)
             + KEY_GAP;
-        let desc_w = help_lines
+        let desc_w = groups
             .iter()
+            .flat_map(|g| g.rows.iter())
             .map(|(_, d)| UnicodeWidthStr::width(*d))
             .max()
             .unwrap_or(0);
-        let width = ((key_w + desc_w) as u16)
+        let total_rows: usize = groups.iter().map(|g| g.rows.len() + 1).sum::<usize>() + (groups.len() - 1);
+        let width = ((key_w + desc_w + INNER_PAD as usize * 2) as u16)
             .min(area.width.saturating_sub(4))
-            .max(30);
-        let height = (help_lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+            .max(34);
+        let height = (total_rows as u16 + 4).min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
         let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
         let panel = Rect { x, y, width, height };
         Self::clear_area(f, panel);
         let block = Block::default()
-            .title(" 帮助 ")
+            .title(format!(" {} ", "⌨ 帮助"))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(styles::ACTIVE_BORDER))
             .border_type(BorderType::Rounded);
         let inner = block.inner(panel);
         f.render_widget(block, panel);
-        for (i, (k, d)) in help_lines.iter().enumerate() {
-            let line = Line::from(vec![
-                Span::styled(pad_right(k, key_w), styles::key_style()),
-                Span::styled(*d, Style::default().fg(Color::White)),
+
+        let mut row_idx = 0usize;
+        let group_count = groups.len();
+        for (gi, group) in groups.iter().enumerate() {
+            // group header
+            let header = Line::from(vec![
+                Span::styled(
+                    format!(" {} ", group.title),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
             ]);
-            f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
+            f.render_widget(
+                header,
+                Rect { x: inner.x + 1, y: inner.y + 1 + row_idx as u16, width: inner.width.saturating_sub(2), height: 1 },
+            );
+            row_idx += 1;
+            for (k, d) in group.rows.iter() {
+                let line = Line::from(vec![
+                    Span::styled("  ", Style::default().fg(styles::DIM)),
+                    Span::styled(pad_right(k, key_w), styles::key_style()),
+                    Span::styled(*d, Style::default().fg(Color::White)),
+                ]);
+                f.render_widget(
+                    line,
+                    Rect { x: inner.x + 1, y: inner.y + 1 + row_idx as u16, width: inner.width.saturating_sub(2), height: 1 },
+                );
+                row_idx += 1;
+            }
+            // blank separator line between groups
+            if gi + 1 < group_count {
+                row_idx += 1;
+            }
         }
     }
 

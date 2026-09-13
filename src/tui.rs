@@ -264,6 +264,13 @@ impl<'a> App<'a> {
             (KeyCode::Char('?'), KeyModifiers::NONE) => {
                 self.overlay = Some(Overlay::Help);
             }
+            (KeyCode::Enter, _) => {
+                // in the file list, Enter switches to the diff panel to view the
+                // currently selected file's comparison
+                if self.focus == Focus::FileList && self.diff_file.is_some() {
+                    self.focus = Focus::Diff;
+                }
+            }
             (KeyCode::Tab, _) => self.toggle_focus(),
             (KeyCode::Char('n'), KeyModifiers::NONE) => self.jump_hunk(1),
             (KeyCode::Char('N'), _) => self.jump_hunk(-1),
@@ -1056,8 +1063,9 @@ impl<'a> App<'a> {
             right.push(Span::styled("│ [Esc]", styles::key_style()));
             right.push(Span::styled("取消", Style::default().fg(styles::DIM)));
         } else {
-            let hints: [(&str, &str); 10] = [
+            let hints: [(&str, &str); 11] = [
                 ("Tab", "焦点"),
+                ("Enter", "查看对比"),
                 ("↑↓", "移动"),
                 ("Pg", "翻页"),
                 ("l", "commit"),
@@ -1222,6 +1230,7 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
                 title: "文件列表",
                 rows: &[
                     ("↑↓", "移动光标"),
+                    ("Enter", "查看选中文件对比"),
                     ("→ / ←", "展开 / 折叠目录"),
                     ("PgUp/PgDn", "列表翻页"),
                     ("/", "过滤文件列表"),

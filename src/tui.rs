@@ -213,6 +213,28 @@ impl<'a> App<'a> {
             self.handle_overlay_key(key);
             return;
         }
+        // while filtering, printable characters feed the filter instead of
+        // triggering global shortcuts (l/n/z/r/1/2/3...)
+        if self.filter.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char(c), KeyModifiers::NONE) => {
+                    self.filter.as_mut().unwrap().push(c);
+                    self.cursor = 0;
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    self.filter.as_mut().unwrap().pop();
+                    self.cursor = 0;
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    self.filter = None;
+                    self.cursor = 0;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 // handled by caller to exit
@@ -276,22 +298,6 @@ impl<'a> App<'a> {
                 Focus::FileList => self.move_cursor(self.list_page() as isize),
                 Focus::Diff => self.move_diff_cursor(self.diff_page() as isize),
             },
-            (KeyCode::Char(c), KeyModifiers::NONE) => {
-                if let Some(filter) = &mut self.filter {
-                    filter.push(c);
-                    self.cursor = 0;
-                }
-            }
-            (KeyCode::Backspace, _) => {
-                if let Some(filter) = &mut self.filter {
-                    filter.pop();
-                    self.cursor = 0;
-                }
-            }
-            (KeyCode::Esc, _) => {
-                self.filter = None;
-                self.cursor = 0;
-            }
             _ => {}
         }
     }
@@ -1380,7 +1386,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App<'_>) -> Res
         terminal.draw(|f| app.render(f))?;
         let event = crossterm::event::read()?;
         if let Event::Key(key) = event {
-            if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE && app.overlay.is_none() {
+            if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE && app.overlay.is_none() && app.filter.is_none() {
                 break;
             }
             if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {

@@ -889,7 +889,7 @@ impl<'a> App<'a> {
 
 fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitEntry], cursor: usize) {
         let width = 60u16.min(area.width.saturating_sub(4));
-        let height = (commits.len() as u16 + 4).min(area.height.saturating_sub(4)).max(6);
+        let height = (commits.len() as u16 + 5).min(area.height.saturating_sub(4)).max(7);
         let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
         let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
         let panel = Rect { x, y, width, height };
@@ -908,7 +908,7 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
             );
             return;
         }
-        let visible = (inner.height.saturating_sub(2)) as usize;
+        let visible = (inner.height.saturating_sub(3)) as usize;
         let start = cursor.saturating_sub(visible.saturating_sub(1));
         for i in 0..visible {
             let idx = start + i;

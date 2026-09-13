@@ -19,6 +19,7 @@ pub const UNTRACKED_FG: Color = Color::Green;
 
 pub const ADD_BG: Color = Color::Rgb(38, 80, 48);
 pub const DEL_BG: Color = Color::Rgb(95, 45, 50);
+pub const OVERLAY_BG: Color = Color::Rgb(20, 22, 30);
 
 pub fn status_fg(status: crate::model::Status) -> Color {
     match status {

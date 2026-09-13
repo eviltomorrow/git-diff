@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::align::{align_rows, hunk_starts, plain_rows, AlignedRow, LineKind};
 use crate::git::{GitFacade, GitRunner};
 use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
-use crate::styles;
+use crate::styles::{self, OVERLAY_BG};
 use crate::tree::{self, VisibleRow};
 
 const LIST_RATIO: u16 = 26;
@@ -883,12 +883,20 @@ impl<'a> App<'a> {
         f.render_widget(Line::from(spans), area);
     }
 
-    fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitEntry], cursor: usize) {
+    fn fill_rect(frame: &mut Frame, area: Rect, bg: Color) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(bg)),
+        area,
+    );
+}
+
+fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitEntry], cursor: usize) {
         let width = 60u16.min(area.width.saturating_sub(4));
         let height = (commits.len() as u16 + 4).min(area.height.saturating_sub(4)).max(6);
         let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
         let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
         let panel = Rect { x, y, width, height };
+        Self::fill_rect(f, panel, OVERLAY_BG);
         let block = Block::default()
             .title(" 选择 commit (HEAD ↔ 选中) ")
             .borders(Borders::ALL)
@@ -896,6 +904,8 @@ impl<'a> App<'a> {
             .border_type(BorderType::Rounded);
         let inner = block.inner(panel);
         f.render_widget(block, panel);
+        // fill the interior so no underlying text bleeds through between rows
+        Self::fill_rect(f, inner, OVERLAY_BG);
         if commits.is_empty() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled("(no commits)", Style::default().fg(styles::DIM)))),
@@ -915,7 +925,7 @@ impl<'a> App<'a> {
             let style = if selected {
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD).bg(styles::SELECTED_BG)
             } else {
-                Style::default()
+                Style::default().bg(OVERLAY_BG)
             };
             let marker = if selected { "▶" } else { " " };
             let line = Line::from(vec![
@@ -927,7 +937,7 @@ impl<'a> App<'a> {
             f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
         }
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled("  ↑↓ 选择   Enter 确认   Esc 关闭", Style::default().fg(styles::DIM)))),
+            Paragraph::new(Line::from(Span::styled("  ↑↓ 选择   Enter 确认   Esc 关闭", Style::default().fg(styles::DIM).bg(OVERLAY_BG)))),
             Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(2), width: inner.width, height: 1 },
         );
     }
@@ -938,6 +948,7 @@ impl<'a> App<'a> {
         let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
         let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
         let panel = Rect { x, y, width, height };
+        Self::fill_rect(f, panel, OVERLAY_BG);
         let block = Block::default()
             .title(" 帮助 ")
             .borders(Borders::ALL)
@@ -945,6 +956,7 @@ impl<'a> App<'a> {
             .border_type(BorderType::Rounded);
         let inner = block.inner(panel);
         f.render_widget(block, panel);
+        Self::fill_rect(f, inner, OVERLAY_BG);
         let help_lines = [
             ("Tab", "切换焦点（文件列表 / 对比区）"),
             ("文件列表焦点:", "操作变更文件列表"),
@@ -965,8 +977,8 @@ impl<'a> App<'a> {
         ];
         for (i, (k, d)) in help_lines.iter().enumerate() {
             let line = Line::from(vec![
-                Span::styled(pad_right(k, 22), styles::key_style()),
-                Span::styled(*d, Style::default().fg(Color::White)),
+                Span::styled(pad_right(k, 22), styles::key_style().bg(OVERLAY_BG)),
+                Span::styled(*d, Style::default().fg(Color::White).bg(OVERLAY_BG)),
             ]);
             f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
         }

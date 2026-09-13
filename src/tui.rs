@@ -191,10 +191,12 @@ impl<'a> App<'a> {
             if f.is_empty() {
                 all
             } else {
+                // substring match on path; a dir row matches if any of its files match
+                let f = f.to_lowercase();
                 all.into_iter()
                     .filter(|r| match r {
-                        VisibleRow::File { file, .. } => file.path.starts_with(f),
-                        VisibleRow::Dir { path, .. } => path.starts_with(f),
+                        VisibleRow::File { file, .. } => file.path.to_lowercase().contains(&f),
+                        VisibleRow::Dir { path, .. } => path.to_lowercase().contains(&f),
                     })
                     .collect()
             }

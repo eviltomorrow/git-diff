@@ -1,0 +1,11 @@
+[package]
+name = "git-diff"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+similar = "2"
+unicode-width = "0.1"
+anyhow = "1"

@@ -42,17 +42,6 @@ pub fn status_fg(status: crate::model::Status) -> Color {
     }
 }
 
-/// Background color for the status badge (a filled letter block).
-pub fn status_badge(status: crate::model::Status) -> Color {
-    match status {
-        crate::model::Status::Modified => Color::Rgb(110, 84, 22),
-        crate::model::Status::Added => Color::Rgb(26, 92, 46),
-        crate::model::Status::Deleted => Color::Rgb(120, 36, 36),
-        crate::model::Status::Renamed => Color::Rgb(22, 78, 92),
-        crate::model::Status::Untracked => Color::Rgb(26, 92, 46),
-    }
-}
-
 pub fn header_style() -> Style {
     Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
 }

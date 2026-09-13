@@ -242,12 +242,15 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
     };
 
     let line = match row {
-        VisibleRow::Dir { collapsed, path, added, deleted, guide, .. } => {
+        VisibleRow::Dir { collapsed, path, added, deleted, guide, depth, .. } => {
             let collapse = if *collapsed { "▸" } else { "▾" };
+            // only the top-level directories get the folder emoji; nested
+            // directories rely on the tree guide + collapse arrow alone
+            let icon = if *depth == 0 { "📁 " } else { "" };
             Line::from(vec![
                 marker,
                 Span::styled(
-                    pad_right(&truncate(&format!("{}{} {}", guide, collapse, short_name(path)), name_w), name_w),
+                    pad_right(&truncate(&format!("{}{} {}{}", guide, collapse, icon, short_name(path)), name_w), name_w),
                     row_style.fg(Color::Yellow),
                 ),
                 Span::raw(" "),
@@ -260,9 +263,9 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
         }
         VisibleRow::File { file, guide, .. } => {
             let status_style = if is_selected {
-                Style::default().fg(Color::Black).add_modifier(Modifier::BOLD).bg(styles::status_badge(file.status))
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Black).bg(styles::status_badge(file.status))
+                Style::default().fg(styles::status_fg(file.status))
             };
             let status = file.status.letter();
             let name = file.path.rsplit('/').next().unwrap_or(&file.path);

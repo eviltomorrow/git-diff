@@ -126,12 +126,24 @@ fn render_header(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         }
         m => format!("比较模式: {}", m.label()),
     };
-    let line = Line::from(vec![
+    let mut spans: Vec<Span> = vec![
         Span::raw(" "),
         Span::styled(mode_desc, styles::header_style()),
         Span::styled(format!("  {}", path_str), Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(line), Rect { x: area.x, y: area.y, width: area.width, height: 1 });
+    ];
+    // diff position summary, right-aligned in the top row
+    let stats = diff_status(ctrl);
+    if !stats.is_empty() {
+        let left_w: usize = spans.iter().map(|s| s.width()).sum();
+        let w = area.width as usize;
+        if left_w + stats.len() + 2 < w {
+            spans.push(Span::raw(" ".repeat(w - left_w - stats.len() - 2)));
+        } else {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: area.x, y: area.y, width: area.width, height: 1 });
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(area.width as usize),
@@ -323,8 +335,7 @@ fn render_diffview(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
     match file {
         Some(file) => {
             let orig_title = pane_title(&orig_label, &file);
-            let stats = diff_status(ctrl);
-            let changed_title = format!("{} {}", pane_title(&changed_label, &file), stats);
+            let changed_title = pane_title(&changed_label, &file);
             if file.is_binary {
                 render_placeholder_pane(f, left[0], &orig_title, "(binary file)", ctrl);
                 render_placeholder_pane(f, left[1], &changed_title, "(binary file)", ctrl);
@@ -374,7 +385,7 @@ fn pane_title(label: &str, file: &ChangedFile) -> String {
     }
 }
 
-/// Compact diff-position summary shown in the changed pane's top-right title.
+/// Compact diff-position summary shown right-aligned in the top header row.
 fn diff_status(ctrl: &Controller<'_>) -> String {
     if ctrl.diff_rows.is_empty() {
         return String::new();

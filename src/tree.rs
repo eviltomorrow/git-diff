@@ -37,6 +37,31 @@ pub fn build_tree(files: &[ChangedFile], sort: SortMode) -> Vec<TreeNode> {
     root
 }
 
+/// Wrap a forest of top-level dirs under a single root directory representing
+/// the current directory. The root carries the aggregated counts.
+pub fn wrap_root(children: Vec<TreeNode>, name: String) -> TreeNode {
+    let mut added = 0u64;
+    let mut deleted = 0u64;
+    for child in &children {
+        match child {
+            TreeNode::Dir { added: a, deleted: d, .. } => {
+                added += a;
+                deleted += d;
+            }
+            TreeNode::File(f) => {
+                added += f.added;
+                deleted += f.deleted;
+            }
+        }
+    }
+    TreeNode::Dir {
+        name,
+        children,
+        added,
+        deleted,
+    }
+}
+
 fn insert_file(nodes: &mut Vec<TreeNode>, path: &str, file: ChangedFile) {
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() == 1 {

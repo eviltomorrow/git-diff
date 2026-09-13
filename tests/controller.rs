@@ -64,20 +64,30 @@ fn loads_mode_a_files_and_selects_first() {
     assert_eq!(ctrl.mode, ComparisonMode::WorkingVsHead);
     assert_eq!(ctrl.files.len(), 2);
     assert_eq!(ctrl.files[0].path, "main.rs");
+    // cursor 0 is the wrapped repo-root dir, not a file
     assert_eq!(ctrl.cursor, 0);
-    assert!(ctrl.diff_file.is_some());
+    match &ctrl.visible_rows()[0] {
+        git_diff::tree::VisibleRow::Dir { path, depth, .. } => {
+            assert_eq!(depth, &0);
+            assert!(!path.is_empty());
+        }
+        _ => panic!("expected root dir row"),
+    }
 }
 
 #[test]
 fn down_moves_cursor_and_loads_diff() {
     let mut ctrl = setup();
-    // tree sorts by path: row0 = lib.rs, row1 = main.rs
+    // rows: root dir(0), lib.rs(1), main.rs(2)
     ctrl.handle_key(key(KeyCode::Down));
     assert_eq!(ctrl.cursor, 1);
+    assert_eq!(ctrl.diff_file.as_ref().unwrap().path, "lib.rs");
+    ctrl.handle_key(key(KeyCode::Down));
+    assert_eq!(ctrl.cursor, 2);
     assert_eq!(ctrl.diff_file.as_ref().unwrap().path, "main.rs");
     // clamps at bottom
     ctrl.handle_key(key(KeyCode::Down));
-    assert_eq!(ctrl.cursor, 1);
+    assert_eq!(ctrl.cursor, 2);
 }
 
 #[test]
@@ -104,7 +114,12 @@ fn filtering_limits_rows_and_enter_focuses_diff() {
         ctrl.handle_key(key(KeyCode::Char(ch)));
     }
     let rows = ctrl.visible_rows();
-    assert_eq!(rows.len(), 1, "filter should keep only main.rs");
+    // root dir row + the matched file
+    assert_eq!(rows.len(), 2, "filter should keep root dir + main.rs");
+    match &rows[1] {
+        git_diff::tree::VisibleRow::File { file, .. } => assert_eq!(file.path, "main.rs"),
+        _ => panic!("expected file row"),
+    }
     assert_eq!(ctrl.focus, Focus::FileList);
     ctrl.handle_key(key(KeyCode::Enter));
     assert_eq!(ctrl.filter, None);
@@ -142,8 +157,9 @@ fn filter_negation_excludes_matches() {
         ctrl.handle_key(key(KeyCode::Char(ch)));
     }
     let rows = ctrl.visible_rows();
-    assert_eq!(rows.len(), 1, "!main should keep only lib.rs");
-    match &rows[0] {
+    // root dir row + the surviving file
+    assert_eq!(rows.len(), 2, "!main should keep root dir + lib.rs");
+    match &rows[1] {
         git_diff::tree::VisibleRow::File { file, .. } => assert_eq!(file.path, "lib.rs"),
         _ => panic!("expected file row"),
     }

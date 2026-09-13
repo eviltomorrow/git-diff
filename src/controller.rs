@@ -188,7 +188,7 @@ impl<'a> Controller<'a> {
         match result {
             Ok(files) => {
                 self.files = files;
-                self.tree_cache = tree::build_tree(&self.files, self.sort);
+                self.rebuild_tree();
                 if keep_state {
                     self.restore_cursor(prev.as_deref());
                 } else {
@@ -543,12 +543,26 @@ impl<'a> Controller<'a> {
             SortMode::Status => SortMode::Added,
             SortMode::Added => SortMode::Path,
         };
-        self.tree_cache = tree::build_tree(&self.files, self.sort);
+        self.rebuild_tree();
         self.status = match self.sort {
             SortMode::Path => "排序: 路径".into(),
             SortMode::Status => "排序: 状态".into(),
             SortMode::Added => "排序: 增行数".into(),
         };
+    }
+
+    /// Rebuild the cached tree from the current files, wrapped under a root
+    /// directory named after the repo's own directory.
+    fn rebuild_tree(&mut self) {
+        let children = tree::build_tree(&self.files, self.sort);
+        self.tree_cache = vec![tree::wrap_root(children, self.repo_root_name())];
+    }
+
+    fn repo_root_name(&self) -> String {
+        self.repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.repo_path.display().to_string())
     }
 
     fn collapse_all_dirs(&mut self) {

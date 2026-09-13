@@ -502,7 +502,7 @@ impl<'a> Controller<'a> {
 
     fn expand_dir(&mut self) {
         let rows = self.visible_rows();
-        if let Some(VisibleRow::Dir { path, .. }) = rows.get(self.cursor) {
+        if let Some(VisibleRow::Dir { path, depth: 1.., .. }) = rows.get(self.cursor) {
             self.collapsed.remove(path);
         }
     }
@@ -511,11 +511,11 @@ impl<'a> Controller<'a> {
         let rows = self.visible_rows();
         let current = rows.get(self.cursor).cloned();
         let collapse_path = match current {
-            Some(VisibleRow::Dir { path, .. }) => Some(path),
+            Some(VisibleRow::Dir { path, depth, .. }) if depth > 0 => Some(path),
             Some(VisibleRow::File { file, .. }) => {
                 file.path.rsplit_once('/').map(|(d, _)| d.to_string())
             }
-            None => None,
+            _ => None,
         };
         if let Some(path) = collapse_path {
             self.collapsed.insert(path.clone());
@@ -566,8 +566,12 @@ impl<'a> Controller<'a> {
     }
 
     fn collapse_all_dirs(&mut self) {
+        // the repo-root wrapper is display-only and never collapses
+        let root = self.repo_root_name();
         for path in tree::all_dir_paths(&self.tree_cache) {
-            self.collapsed.insert(path);
+            if path != root {
+                self.collapsed.insert(path);
+            }
         }
         self.load_diff();
     }

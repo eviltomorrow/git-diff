@@ -181,8 +181,14 @@ fn walk(
     let count = nodes.len();
     for (i, node) in nodes.iter().enumerate() {
         let is_last = i + 1 == count;
-        let connector = if is_last { "└─" } else { "├─" };
-        let guide = format!("{}{}", prefix, connector);
+        // the top-most node (the repo-root wrapper) has no parent, so it
+        // gets no connector; its children start the guide lines.
+        let guide = if depth == 0 {
+            prefix.to_string()
+        } else {
+            let connector = if is_last { "└─" } else { "├─" };
+            format!("{}{}", prefix, connector)
+        };
         match node {
             TreeNode::Dir { name, children, added, deleted } => {
                 let path = if path_prefix.is_empty() {
@@ -266,8 +272,13 @@ pub fn filtered_rows(
         let count = kept.len();
         for (i, node) in kept.iter().enumerate() {
             let is_last = i + 1 == count;
-            let connector = if is_last { "└─" } else { "├─" };
-            let guide = format!("{}{}", prefix, connector);
+            // the top-most node has no parent, so no connector at depth 0
+            let guide = if depth == 0 {
+                prefix.to_string()
+            } else {
+                let connector = if is_last { "└─" } else { "├─" };
+                format!("{}{}", prefix, connector)
+            };
             match node {
                 TreeNode::Dir { name, children, added, deleted } => {
                     let path = if path_prefix.is_empty() {

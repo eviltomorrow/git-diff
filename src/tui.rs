@@ -243,10 +243,10 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
 
     let line = match row {
         VisibleRow::Dir { collapsed, path, added, deleted, guide, depth, .. } => {
-            let collapse = if *collapsed { "▸" } else { "▾" };
-            // only the top-level directories get the folder emoji; nested
-            // directories rely on the tree guide + collapse arrow alone
-            let icon = if *depth == 0 { "📁 " } else { "" };
+            let is_root = *depth == 0;
+            // the root (current directory) is display-only: no collapse arrow,
+            // just the folder emoji. child dirs get the ▾/▸ collapse arrow.
+            let icon = if is_root { "📁 " } else if *collapsed { "▸ " } else { "▾ " };
             let guide_w = UnicodeWidthStr::width(guide.as_str());
             let name_avail = name_w.saturating_sub(guide_w);
             Line::from(vec![
@@ -255,7 +255,7 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
                 // the row is selected
                 Span::styled(guide.to_string(), guide_style()),
                 Span::styled(
-                    pad_right(&truncate(&format!("{} {}{}", collapse, icon, short_name(path)), name_avail), name_avail),
+                    pad_right(&truncate(&format!("{}{}", icon, short_name(path)), name_avail), name_avail),
                     row_style.fg(Color::Yellow),
                 ),
                 Span::raw(" "),

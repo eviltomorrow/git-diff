@@ -273,7 +273,7 @@ impl<'a> App<'a> {
             }
             (KeyCode::Tab, _) => self.toggle_focus(),
             (KeyCode::Char('n'), KeyModifiers::NONE) => self.jump_hunk(1),
-            (KeyCode::Char('N'), _) => self.jump_hunk(-1),
+            (KeyCode::Char('m'), KeyModifiers::NONE) => self.jump_hunk(-1),
             (KeyCode::Char('z'), KeyModifiers::NONE) => {
                 self.fold_unchanged = !self.fold_unchanged;
             }
@@ -1071,7 +1071,7 @@ impl<'a> App<'a> {
                 ("l", "commit"),
                 ("1/2/3", "模式"),
                 ("/", "过滤"),
-                ("n/N", "hunk"),
+                ("n/m", "hunk"),
                 ("z", "折叠"),
                 ("?", "帮助"),
                 ("q", "退出"),
@@ -1242,7 +1242,7 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
                     ("↑↓", "移动当前行"),
                     ("PgUp/PgDn", "按页滚动"),
                     ("→ / ←", "水平滚动"),
-                    ("n / N", "跳转 hunk"),
+                    ("n / m", "跳转下一个/上一个 hunk"),
                     ("z", "折叠/展开未改动段"),
                 ],
             },
@@ -1468,7 +1468,7 @@ mod width_check {
                     ("↑↓", "逐行滚动"),
                     ("PgUp/PgDn", "按页滚动"),
                     ("→ / ←", "水平滚动"),
-                    ("n / N", "跳转 hunk"),
+                    ("n / m", "跳转下一个/上一个 hunk"),
                 ],
             },
         ];

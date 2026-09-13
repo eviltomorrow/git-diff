@@ -16,7 +16,7 @@ use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
 use crate::tree::{self, VisibleRow};
 
-const LIST_RATIO: u16 = 22;
+const LIST_RATIO: u16 = 26;
 const LINE_LIMIT: usize = 50_000;
 
 fn line_count(content: &[u8]) -> usize {
@@ -499,7 +499,7 @@ impl<'a> App<'a> {
         }
 
         const MARKER_W: usize = 2;
-        const STATUS_W: usize = 4;
+        const STATUS_W: usize = 6;
         const PLUS_W: usize = 4;
         const MINUS_W: usize = 4;
         const GAP: usize = 1;
@@ -515,7 +515,7 @@ impl<'a> App<'a> {
             Span::raw(" "),
             Span::styled(pad_left("-", MINUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
-            Span::styled(pad_left("St", STATUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
+            Span::styled(pad_left("Status", STATUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
         ]);
         f.render_widget(header, Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
         f.render_widget(
@@ -545,7 +545,7 @@ impl<'a> App<'a> {
     }
 
     fn render_list_row(&mut self, f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool, name_w: usize) {
-        const STATUS_W: usize = 4;
+        const STATUS_W: usize = 6;
         const PLUS_W: usize = 4;
         const MINUS_W: usize = 4;
 

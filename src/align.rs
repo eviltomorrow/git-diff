@@ -228,6 +228,39 @@ pub fn hunk_index(starts: &[usize], cursor_row: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// A maximal run of unchanged rows (both sides present and Equal).
+/// `start` is inclusive, `end` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRun {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Returns the runs of consecutive unchanged rows. Rows are "unchanged" only
+/// when both the original and changed sides are present and Equal, so runs
+/// never overlap hunks.
+pub fn fold_runs(rows: &[AlignedRow]) -> Vec<FoldRun> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if is_unchanged(&rows[i]) {
+            let start = i;
+            while i < rows.len() && is_unchanged(&rows[i]) {
+                i += 1;
+            }
+            runs.push(FoldRun { start, end: i });
+        } else {
+            i += 1;
+        }
+    }
+    runs
+}
+
+fn is_unchanged(row: &AlignedRow) -> bool {
+    row.original.as_ref().map(|c| c.kind == LineKind::Equal).unwrap_or(false)
+        && row.changed.as_ref().map(|c| c.kind == LineKind::Equal).unwrap_or(false)
+}
+
 pub fn plain_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<AlignedRow> {
     let old_lines = to_lines(original);
     let new_lines = to_lines(changed);
@@ -379,6 +412,27 @@ mod tests {
         assert_eq!(hunk_index(&starts, 40), 2);
         assert_eq!(hunk_index(&starts, 59), 2);
         assert_eq!(hunk_index(&[], 10), 0);
+    }
+
+    #[test]
+    fn fold_runs_find_unchanged_spans() {
+        let rows = align_rows(
+            Some(b"a\nb\nc\nd\ne\nf\n"),
+            Some(b"a\nB\nc\nd\nE\nf\n"),
+        );
+        // rows: a(0 equal), B(1 change), c(2), d(3), E(4 change), f(5)
+        let runs = fold_runs(&rows);
+        assert_eq!(runs, vec![
+            FoldRun { start: 0, end: 1 },
+            FoldRun { start: 2, end: 4 },
+            FoldRun { start: 5, end: 6 },
+        ]);
+    }
+
+    #[test]
+    fn fold_runs_empty_for_all_changed() {
+        let rows = align_rows(Some(b"a\nb\n"), Some(b"c\nd\n"));
+        assert!(fold_runs(&rows).is_empty());
     }
 
     #[test]

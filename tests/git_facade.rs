@@ -1,5 +1,5 @@
 use git_diff::model::*;
-use git_diff::git::{GitFacade, GitRunner, parse_numstat, parse_name_status, parse_log};
+use git_diff::git::{GitFacade, GitRunner, NumstatRow, StatusRow, parse_numstat, parse_name_status, parse_log};
 
 struct FakeRunner {
     responses: Vec<(&'static [&'static str], &'static str)>,
@@ -27,9 +27,9 @@ fn parse_numstat_basic() {
     let out = "2\t1\tsrc/main.rs\n30\t0\tsrc/lib.rs\n0\t5\told.txt\n";
     let rows = parse_numstat(out, false).unwrap();
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0], (String::from("src/main.rs"), None, 2, 1, false));
-    assert_eq!(rows[1], (String::from("src/lib.rs"), None, 30, 0, false));
-    assert_eq!(rows[2], (String::from("old.txt"), None, 0, 5, false));
+    assert_eq!(rows[0], NumstatRow { path: "src/main.rs".into(), old_path: None, added: 2, deleted: 1, binary: false });
+    assert_eq!(rows[1], NumstatRow { path: "src/lib.rs".into(), old_path: None, added: 30, deleted: 0, binary: false });
+    assert_eq!(rows[2], NumstatRow { path: "old.txt".into(), old_path: None, added: 0, deleted: 5, binary: false });
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn parse_numstat_rename() {
     let out = "1\t1\tsrc/a.rs => src/b.rs\n";
     let rows = parse_numstat(out, true).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0], (String::from("src/b.rs"), Some(String::from("src/a.rs")), 1, 1, false));
+    assert_eq!(rows[0], NumstatRow { path: "src/b.rs".into(), old_path: Some("src/a.rs".into()), added: 1, deleted: 1, binary: false });
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn parse_numstat_binary() {
     let out = "-\t-\tbinary.png\n";
     let rows = parse_numstat(out, false).unwrap();
     assert_eq!(rows.len(), 1);
-    assert!(rows[0].4);
+    assert!(rows[0].binary);
 }
 
 #[test]
@@ -53,9 +53,9 @@ fn parse_name_status_basic() {
     let out = "M\tsrc/main.rs\nA\tsrc/lib.rs\nD\told.txt\n";
     let rows = parse_name_status(out).unwrap();
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0], (Status::Modified, String::from("src/main.rs"), None));
-    assert_eq!(rows[1], (Status::Added, String::from("src/lib.rs"), None));
-    assert_eq!(rows[2], (Status::Deleted, String::from("old.txt"), None));
+    assert_eq!(rows[0], StatusRow { status: Status::Modified, path: "src/main.rs".into(), old_path: None });
+    assert_eq!(rows[1], StatusRow { status: Status::Added, path: "src/lib.rs".into(), old_path: None });
+    assert_eq!(rows[2], StatusRow { status: Status::Deleted, path: "old.txt".into(), old_path: None });
 }
 
 #[test]
@@ -63,8 +63,8 @@ fn parse_name_status_rename() {
     let out = "R100\tsrc/a.rs\tsrc/b.rs\nR075\tsrc/c.rs\tsrc/d.rs\n";
     let rows = parse_name_status(out).unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0], (Status::Renamed, String::from("src/b.rs"), Some(String::from("src/a.rs"))));
-    assert_eq!(rows[1], (Status::Renamed, String::from("src/d.rs"), Some(String::from("src/c.rs"))));
+    assert_eq!(rows[0], StatusRow { status: Status::Renamed, path: "src/b.rs".into(), old_path: Some("src/a.rs".into()) });
+    assert_eq!(rows[1], StatusRow { status: Status::Renamed, path: "src/d.rs".into(), old_path: Some("src/c.rs".into()) });
 }
 
 #[test]

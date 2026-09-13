@@ -3,7 +3,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, Context};
 
-use crate::model::{ChangedFile, CommitEntry, ComparisonMode, FileSides, Status};
+use crate::model::{ChangedFile, CommitEntry, ComparisonMode, FileSides, SidePair, SideRef, Status};
 
 pub trait GitRunner {
     fn run(&self, args: &[&str]) -> anyhow::Result<String>;
@@ -39,7 +39,25 @@ pub struct GitFacade<'a> {
     root: PathBuf,
 }
 
-type NumstatRow = (String, Option<String>, u64, u64, bool);
+/// One row of `git diff --numstat`: the new path, optional old path for
+/// renames, added/deleted line counts, and whether the file is binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumstatRow {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub added: u64,
+    pub deleted: u64,
+    pub binary: bool,
+}
+
+/// One row of `git diff --name-status`: the status, path, and old path for
+/// renames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusRow {
+    pub status: Status,
+    pub path: String,
+    pub old_path: Option<String>,
+}
 
 pub fn parse_numstat(out: &str, with_rename: bool) -> anyhow::Result<Vec<NumstatRow>> {
     let mut rows = Vec::new();
@@ -71,12 +89,18 @@ pub fn parse_numstat(out: &str, with_rename: bool) -> anyhow::Result<Vec<Numstat
         } else {
             (path.to_string(), None)
         };
-        rows.push((new_path, old_path, added, deleted, binary));
+        rows.push(NumstatRow {
+            path: new_path,
+            old_path,
+            added,
+            deleted,
+            binary,
+        });
     }
     Ok(rows)
 }
 
-pub fn parse_name_status(out: &str) -> anyhow::Result<Vec<(Status, String, Option<String>)>> {
+pub fn parse_name_status(out: &str) -> anyhow::Result<Vec<StatusRow>> {
     let mut rows = Vec::new();
     for line in out.lines() {
         if line.trim().is_empty() {
@@ -87,7 +111,11 @@ pub fn parse_name_status(out: &str) -> anyhow::Result<Vec<(Status, String, Optio
         if status.strip_prefix('R').is_some() {
             let old = it.next().unwrap_or("").to_string();
             let new = it.next().unwrap_or("").to_string();
-            rows.push((Status::Renamed, new, Some(old)));
+            rows.push(StatusRow {
+                status: Status::Renamed,
+                path: new,
+                old_path: Some(old),
+            });
             continue;
         }
         let path = it.next().unwrap_or("").to_string();
@@ -97,7 +125,11 @@ pub fn parse_name_status(out: &str) -> anyhow::Result<Vec<(Status, String, Optio
             "D" => Status::Deleted,
             _ => Status::Modified,
         };
-        rows.push((status, path, None));
+        rows.push(StatusRow {
+            status,
+            path,
+            old_path: None,
+        });
     }
     Ok(rows)
 }
@@ -140,22 +172,22 @@ impl<'a> GitFacade<'a> {
 
         let status_by_path: std::collections::HashMap<String, (Status, Option<String>)> = status_rows
             .into_iter()
-            .map(|(s, p, old)| (p, (s, old)))
+            .map(|s| (s.path, (s.status, s.old_path)))
             .collect();
 
         let mut files = Vec::new();
-        for (path, numstat_old, added, deleted, is_binary) in rows {
+        for row in rows {
             let (status, name_status_old) = status_by_path
-                .get(&path)
+                .get(&row.path)
                 .cloned()
                 .unwrap_or((Status::Modified, None));
             files.push(ChangedFile {
                 status,
-                path,
-                old_path: name_status_old.or(numstat_old),
-                added,
-                deleted,
-                is_binary,
+                path: row.path,
+                old_path: name_status_old.or(row.old_path),
+                added: row.added,
+                deleted: row.deleted,
+                is_binary: row.binary,
             });
         }
         Ok(files)
@@ -236,50 +268,42 @@ impl<'a> GitFacade<'a> {
             .with_context(|| format!("failed to read {}", path))
     }
 
-    pub fn file_sides(&self, mode: ComparisonMode, file: &ChangedFile) -> anyhow::Result<FileSides> {
-        let origin_path = file.old_path.as_deref().unwrap_or(&file.path);
-        match mode {
-            ComparisonMode::CommitVsHead => Err(anyhow!("use file_sides_between")),
-            _ => {
-                let no_origin = file.status == Status::Added || file.status == Status::Untracked;
-                let no_changed = file.status == Status::Deleted;
-                let (original, changed) = match mode {
-                    ComparisonMode::WorkingVsHead => (
-                        if no_origin { None } else { self.fetch_ref("HEAD", origin_path)? },
-                        if no_changed { None } else { self.read_worktree(&file.path).ok() },
-                    ),
-                    ComparisonMode::StagedVsHead => (
-                        if no_origin { None } else { self.fetch_ref("HEAD", origin_path)? },
-                        if no_changed { None } else { self.fetch_ref("", &file.path)? },
-                    ),
-                    ComparisonMode::StagedVsWorking => (
-                        if no_origin { None } else { self.fetch_ref("", origin_path)? },
-                        if no_changed { None } else { self.read_worktree(&file.path).ok() },
-                    ),
-                    ComparisonMode::CommitVsHead => unreachable!(),
-                };
-                Ok(FileSides {
-                    original,
-                    changed,
-                })
-            }
-        }
+    fn fetch_side(&self, side: &SideRef, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    match side {
+        SideRef::Worktree => Ok(self.read_worktree(path).ok()),
+        SideRef::Index => self.fetch_ref("", path),
+        SideRef::Head => self.fetch_ref("HEAD", path),
+        SideRef::Commit(c) => self.fetch_ref(c, path),
     }
+}
 
-    pub fn file_sides_between(&self, commit: &str, file: &ChangedFile) -> anyhow::Result<FileSides> {
-        let origin_path = file.old_path.as_deref().unwrap_or(&file.path);
-        let original = if file.status == Status::Added || file.status == Status::Untracked {
-            None
-        } else {
-            self.fetch_ref(commit, origin_path)?
-        };
-        let changed = if file.status == Status::Deleted {
-            None
-        } else {
-            self.fetch_ref("HEAD", &file.path)?
-        };
-        Ok(FileSides { original, changed })
+pub fn file_sides(&self, mode: ComparisonMode, file: &ChangedFile) -> anyhow::Result<FileSides> {
+    if mode == ComparisonMode::CommitVsHead {
+        return Err(anyhow!("use file_sides_between"));
     }
+    let pair = SidePair::for_mode(mode, None);
+    let origin_path = file.old_path.as_deref().unwrap_or(&file.path);
+    let no_origin = file.status == Status::Added || file.status == Status::Untracked;
+    let no_changed = file.status == Status::Deleted;
+    let original = if no_origin { None } else { self.fetch_side(&pair.original, origin_path)? };
+    let changed = if no_changed { None } else { self.fetch_side(&pair.changed, &file.path)? };
+    Ok(FileSides { original, changed })
+}
+
+pub fn file_sides_between(&self, commit: &str, file: &ChangedFile) -> anyhow::Result<FileSides> {
+    let origin_path = file.old_path.as_deref().unwrap_or(&file.path);
+    let original = if file.status == Status::Added || file.status == Status::Untracked {
+        None
+    } else {
+        self.fetch_ref(commit, origin_path)?
+    };
+    let changed = if file.status == Status::Deleted {
+        None
+    } else {
+        self.fetch_ref("HEAD", &file.path)?
+    };
+    Ok(FileSides { original, changed })
+}
 }
 
 pub fn count_lines(content: &[u8]) -> usize {

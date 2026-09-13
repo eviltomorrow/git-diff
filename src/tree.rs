@@ -57,9 +57,9 @@ pub enum VisibleRow {
     File { file: ChangedFile, depth: usize },
 }
 
-pub fn visible_rows(nodes: &[TreeNode], collapsed: &std::collections::HashSet<String>, prefix: &str) -> Vec<VisibleRow> {
+pub fn visible_rows(nodes: &[TreeNode], collapsed: &std::collections::HashSet<String>) -> Vec<VisibleRow> {
     let mut rows = Vec::new();
-    walk(nodes, collapsed, prefix, 0, &mut rows);
+    walk(nodes, collapsed, "", 0, &mut rows);
     rows
 }
 
@@ -96,31 +96,31 @@ fn walk(
     }
 }
 
-pub fn file_path_at_row(row: &VisibleRow) -> Option<&str> {
-    match row {
-        VisibleRow::File { file, .. } => Some(&file.path),
-        _ => None,
-    }
-}
-
-pub fn is_dir_row(row: &VisibleRow) -> bool {
-    matches!(row, VisibleRow::Dir { .. })
-}
-
-pub fn count_changed(nodes: &[TreeNode]) -> usize {
-    nodes
-        .iter()
-        .map(|n| match n {
-            TreeNode::Dir { children, .. } => count_changed(children),
-            TreeNode::File(_) => 1,
-        })
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Status;
+
+    pub fn file_path_at_row(row: &VisibleRow) -> Option<&str> {
+        match row {
+            VisibleRow::File { file, .. } => Some(&file.path),
+            _ => None,
+        }
+    }
+
+    pub fn is_dir_row(row: &VisibleRow) -> bool {
+        matches!(row, VisibleRow::Dir { .. })
+    }
+
+    pub fn count_changed(nodes: &[TreeNode]) -> usize {
+        nodes
+            .iter()
+            .map(|n| match n {
+                TreeNode::Dir { children, .. } => count_changed(children),
+                TreeNode::File(_) => 1,
+            })
+            .sum()
+    }
 
     fn f(status: Status, path: &str) -> ChangedFile {
         ChangedFile {
@@ -154,12 +154,12 @@ mod tests {
         let files = vec![f(Status::Modified, "src/a.rs"), f(Status::Modified, "src/b.rs")];
         let tree = build_tree(&files);
         let mut collapsed = std::collections::HashSet::new();
-        let rows = visible_rows(&tree, &collapsed, "");
+        let rows = visible_rows(&tree, &collapsed);
         assert_eq!(rows.len(), 3);
         assert!(is_dir_row(&rows[0]));
         assert!(file_path_at_row(&rows[1]).is_some());
         collapsed.insert("src".to_string());
-        let rows = visible_rows(&tree, &collapsed, "");
+        let rows = visible_rows(&tree, &collapsed);
         assert_eq!(rows.len(), 1);
     }
 

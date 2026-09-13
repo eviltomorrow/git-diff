@@ -93,6 +93,12 @@ impl<'a> App<'a> {
             ComparisonMode::WorkingVsHead if !self.has_commits => {
                 self.facade.untracked_files()
             }
+            ComparisonMode::WorkingVsHead => {
+                let mut files = self.facade.changed_files(self.mode)?;
+                let untracked = self.facade.untracked_files()?;
+                files.extend(untracked);
+                Ok(files)
+            }
             _ => self.facade.changed_files(self.mode),
         };
         self.loading = false;
@@ -492,13 +498,23 @@ impl<'a> App<'a> {
             return;
         }
 
+        const MARKER_W: usize = 2;
+        const STATUS_W: usize = 6;
+        const PLUS_W: usize = 5;
+        const MINUS_W: usize = 5;
+        let name_w = inner
+            .width
+            .saturating_sub((MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3) as u16) as usize;
+
         let header = Line::from(vec![
-            Span::styled(pad_right("Status", 6), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
-            Span::styled(pad_right("Name", 24), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
+            Span::raw(" ".repeat(MARKER_W)),
+            Span::styled(pad_right("Status", STATUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
-            Span::styled(pad_left("+", 4), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
+            Span::styled(pad_right("Name", name_w), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
-            Span::styled(pad_left("-", 4), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
+            Span::styled(pad_left("+", PLUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(pad_left("-", MINUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
         ]);
         f.render_widget(header, Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
         f.render_widget(
@@ -523,11 +539,15 @@ impl<'a> App<'a> {
                 break;
             }
             let is_selected = idx == self.cursor;
-            self.render_list_row(f, inner, &rows[idx], i as u16, is_selected);
+            self.render_list_row(f, inner, &rows[idx], i as u16, is_selected, name_w);
         }
     }
 
-    fn render_list_row(&mut self, f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool) {
+    fn render_list_row(&mut self, f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool, name_w: usize) {
+        const STATUS_W: usize = 6;
+        const PLUS_W: usize = 5;
+        const MINUS_W: usize = 5;
+
         let selected_style = Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
@@ -535,11 +555,28 @@ impl<'a> App<'a> {
         let row_style = if is_selected { selected_style } else { Style::default() };
         let indent = "  ".repeat(row_depth(row));
         let width = inner.width.saturating_sub(2) as usize;
+
+        let marker = if is_selected {
+            Span::styled("▌ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw("  ")
+        };
+
         let line = match row {
             VisibleRow::Dir { collapsed, path, .. } => {
-                let marker = if *collapsed { "▸" } else { "▾" };
+                let collapse = if *collapsed { "▸" } else { "▾" };
                 Line::from(vec![
-                    Span::styled(format!("{} {} 📁 {}", marker, indent, short_name(path)), row_style.fg(styles::DIR_FG)),
+                    marker,
+                    Span::styled(pad_right("", STATUS_W), Style::default()),
+                    Span::raw(" "),
+                    Span::styled(
+                        truncate(&format!("{} {} 📁 {}", collapse, indent, short_name(path)), name_w),
+                        if is_selected { row_style.fg(Color::Yellow) } else { Style::default().fg(styles::DIR_FG) },
+                    ),
+                    Span::raw(" "),
+                    Span::styled(pad_left("", PLUS_W), Style::default().fg(styles::DIM)),
+                    Span::raw(" "),
+                    Span::styled(pad_left("", MINUS_W), Style::default().fg(styles::DIM)),
                 ])
             }
             VisibleRow::File { file, .. } => {
@@ -548,19 +585,28 @@ impl<'a> App<'a> {
                 } else {
                     Style::default().fg(styles::status_fg(file.status))
                 };
-                let marker = if is_selected { "▶" } else { " " };
                 let status = file.status.letter();
                 let name = file.path.rsplit('/').next().unwrap_or(&file.path);
                 let plus = format!("+{}", file.added);
                 let minus = format!("-{}", file.deleted);
                 Line::from(vec![
-                    Span::styled(marker, row_style),
+                    marker,
+                    Span::styled(pad_right(status, STATUS_W), status_style),
                     Span::raw(" "),
-                    Span::styled(pad_right(status, 4), status_style),
+                    Span::styled(
+                        truncate(&format!("{}{}", indent, name), name_w),
+                        if is_selected { row_style.fg(Color::White) } else { Style::default().fg(Color::White) },
+                    ),
                     Span::raw(" "),
-                    Span::styled(truncate(&format!("{}{}", indent, name), width.saturating_sub(20)), row_style.fg(Color::White)),
-                    Span::styled(format!("{:>4}", plus), if is_selected { row_style } else { Style::default().fg(styles::STATUS_OK) }),
-                    Span::styled(format!(" {:>4}", minus), if is_selected { row_style } else { Style::default().fg(styles::STATUS_ERR) }),
+                    Span::styled(
+                        pad_left(&plus, PLUS_W),
+                        if is_selected { row_style } else { Style::default().fg(styles::STATUS_OK) },
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        pad_left(&minus, MINUS_W),
+                        if is_selected { row_style } else { Style::default().fg(styles::STATUS_ERR) },
+                    ),
                 ])
             }
         };

@@ -28,6 +28,12 @@ enum Overlay {
     Help,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Focus {
+    FileList,
+    Diff,
+}
+
 pub struct App<'a> {
     facade: GitFacade<'a>,
     repo_path: PathBuf,
@@ -45,6 +51,9 @@ pub struct App<'a> {
     hunk_idx: usize,
     filter: Option<String>,
     overlay: Option<Overlay>,
+    focus: Focus,
+    diff_viewport: usize,
+    list_viewport: usize,
     loading: bool,
     status: String,
 }
@@ -68,6 +77,9 @@ impl<'a> App<'a> {
             hunk_idx: 0,
             filter: None,
             overlay: None,
+            focus: Focus::FileList,
+            diff_viewport: 0,
+            list_viewport: 0,
             loading: false,
             status: String::new(),
         };
@@ -216,20 +228,37 @@ impl<'a> App<'a> {
             (KeyCode::Char('?'), KeyModifiers::NONE) => {
                 self.overlay = Some(Overlay::Help);
             }
+            (KeyCode::Tab, _) => self.toggle_focus(),
             (KeyCode::Char('n'), KeyModifiers::NONE) => self.jump_hunk(1),
             (KeyCode::Char('N'), KeyModifiers::NONE) => self.jump_hunk(-1),
             (KeyCode::Right, KeyModifiers::CONTROL) => self.scroll_horizontal(1),
             (KeyCode::Left, KeyModifiers::CONTROL) => self.scroll_horizontal(-1),
-            (KeyCode::Up, _) => self.move_cursor(-1),
-            (KeyCode::Down, _) => self.move_cursor(1),
-            (KeyCode::Right, _) => self.expand_dir(),
-            (KeyCode::Left, _) => self.collapse_dir(),
-            (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                self.scroll_diff(-1)
-            }
-            (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                self.scroll_diff(1)
-            }
+            (KeyCode::Char('k'), KeyModifiers::CONTROL) => self.scroll_diff(-1),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL) => self.scroll_diff(1),
+            (KeyCode::Up, _) => match self.focus {
+                Focus::FileList => self.move_cursor(-1),
+                Focus::Diff => self.scroll_diff(-1),
+            },
+            (KeyCode::Down, _) => match self.focus {
+                Focus::FileList => self.move_cursor(1),
+                Focus::Diff => self.scroll_diff(1),
+            },
+            (KeyCode::Right, _) => match self.focus {
+                Focus::FileList => self.expand_dir(),
+                Focus::Diff => self.scroll_horizontal(1),
+            },
+            (KeyCode::Left, _) => match self.focus {
+                Focus::FileList => self.collapse_dir(),
+                Focus::Diff => self.scroll_horizontal(-1),
+            },
+            (KeyCode::PageUp, _) => match self.focus {
+                Focus::FileList => self.move_cursor(-(self.list_page() as isize)),
+                Focus::Diff => self.scroll_diff(-(self.diff_page() as isize)),
+            },
+            (KeyCode::PageDown, _) => match self.focus {
+                Focus::FileList => self.move_cursor(self.list_page() as isize),
+                Focus::Diff => self.scroll_diff(self.diff_page() as isize),
+            },
             (KeyCode::Char(c), KeyModifiers::NONE) => {
                 if let Some(filter) = &mut self.filter {
                     filter.push(c);
@@ -335,6 +364,21 @@ impl<'a> App<'a> {
                 self.load_diff();
             }
         }
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::FileList => Focus::Diff,
+            Focus::Diff => Focus::FileList,
+        };
+    }
+
+    fn list_page(&self) -> usize {
+        self.list_viewport.max(1)
+    }
+
+    fn diff_page(&self) -> usize {
+        self.diff_viewport.max(1)
     }
 
     fn scroll_diff(&mut self, delta: isize) {
@@ -478,11 +522,13 @@ impl<'a> App<'a> {
     }
 
     fn render_filelist(&mut self, f: &mut Frame, area: Rect) {
+        let is_active = self.focus == Focus::FileList;
+        let border_fg = if is_active { styles::ACTIVE_BORDER } else { styles::INACTIVE_BORDER };
         let block = Block::default()
             .title(format!(" 变更文件 ({}) ", self.files.len()))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::ACTIVE_BORDER))
-            .border_type(BorderType::Rounded);
+            .border_style(Style::default().fg(border_fg))
+            .border_type(if is_active { BorderType::Plain } else { BorderType::Rounded });
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -524,6 +570,7 @@ impl<'a> App<'a> {
         );
 
         let list_height = inner.height.saturating_sub(2) as usize;
+        self.list_viewport = list_height;
         if self.cursor >= rows.len() {
             self.cursor = rows.len().saturating_sub(1);
         }
@@ -616,6 +663,7 @@ impl<'a> App<'a> {
     fn render_diffview(&mut self, frame: &mut Frame, area: Rect) {
         let file = self.diff_file.clone();
         let (orig_label, changed_label) = self.side_labels();
+        self.diff_viewport = area.height.saturating_sub(2) as usize;
         let left = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -677,10 +725,13 @@ impl<'a> App<'a> {
     }
 
     fn render_diff_pane(&mut self, frame: &mut Frame, area: Rect, label: &str, is_original: bool) {
+        let is_active = self.focus == Focus::Diff;
+        let border_fg = if is_active { styles::ACTIVE_BORDER } else { styles::INACTIVE_BORDER };
         let block = Block::default()
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::INACTIVE_BORDER));
+            .border_style(Style::default().fg(border_fg))
+            .border_type(if is_active { BorderType::Plain } else { BorderType::Rounded });
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -743,10 +794,13 @@ impl<'a> App<'a> {
     }
 
     fn render_placeholder_pane_with_title(&mut self, f: &mut Frame, area: Rect, label: &str, msg: &str) {
+        let is_active = self.focus == Focus::Diff;
+        let border_fg = if is_active { styles::ACTIVE_BORDER } else { styles::INACTIVE_BORDER };
         let block = Block::default()
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::INACTIVE_BORDER));
+            .border_style(Style::default().fg(border_fg))
+            .border_type(if is_active { BorderType::Plain } else { BorderType::Rounded });
         let inner = block.inner(area);
         f.render_widget(block, area);
         let msg = Line::from(Span::styled(msg, Style::default().fg(styles::DIM)));
@@ -782,8 +836,9 @@ impl<'a> App<'a> {
         }
 
         let mut hint: Vec<Span> = vec![
+            key_hint("Tab"),
             key_hint("↑↓"),
-            key_hint("→←"),
+            key_hint("PgUp/PgDn"),
             key_hint("l"),
             key_hint("1/2/3"),
             key_hint("/"),
@@ -858,7 +913,7 @@ impl<'a> App<'a> {
 
     fn render_help(&mut self, f: &mut Frame, area: Rect) {
         let width = 46u16.min(area.width.saturating_sub(4));
-        let height = 16u16.min(area.height.saturating_sub(2));
+        let height = 19u16.min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
         let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
         let panel = Rect { x, y, width, height };
@@ -870,10 +925,15 @@ impl<'a> App<'a> {
         let inner = block.inner(panel);
         f.render_widget(block, panel);
         let help_lines = [
+            ("Tab", "切换焦点（文件列表 / 对比区）"),
+            ("文件列表焦点:", "操作变更文件列表"),
             ("↑↓", "移动光标"),
             ("→ / ←", "展开 / 折叠目录"),
-            ("Ctrl+↑↓ / PgUp/PgDn", "滚动对比区"),
-            ("Ctrl+←→", "水平滚动对比区"),
+            ("PgUp/PgDn", "列表翻页"),
+            ("对比区焦点:", "操作对比视图"),
+            ("↑↓", "逐行滚动对比区"),
+            ("PgUp/PgDn", "按页滚动对比区"),
+            ("→ / ←", "水平滚动对比区"),
             ("n / N", "跳转下一个/上一个 hunk"),
             ("l", "打开 commit 选择器 (模式D)"),
             ("1 / 2 / 3", "切换比较模式 A/B/C"),

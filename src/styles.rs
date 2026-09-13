@@ -20,6 +20,15 @@ pub const UNTRACKED_FG: Color = Color::Green;
 pub const ADD_BG: Color = Color::Rgb(38, 80, 48);
 pub const DEL_BG: Color = Color::Rgb(95, 45, 50);
 
+/// Stronger background for inline-emphasized characters within an added line.
+pub const INLINE_ADD_BG: Color = Color::Rgb(55, 115, 65);
+/// Stronger background for inline-emphasized characters within a deleted line.
+pub const INLINE_DEL_BG: Color = Color::Rgb(140, 60, 60);
+/// Background for trailing whitespace markers.
+pub const TRAILING_WS_BG: Color = Color::Rgb(150, 90, 40);
+/// Background for the current diff cursor line.
+pub const CURSOR_BG: Color = Color::Rgb(40, 50, 70);
+
 pub fn status_fg(status: crate::model::Status) -> Color {
     match status {
         crate::model::Status::Modified => MODIFIED_FG,

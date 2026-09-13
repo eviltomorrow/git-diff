@@ -6,6 +6,6 @@ edition = "2024"
 [dependencies]
 ratatui = "0.28"
 crossterm = { version = "0.28", features = ["event-stream"] }
-similar = "2"
+similar = { version = "2", features = ["inline"] }
 unicode-width = "0.1"
 anyhow = "1"

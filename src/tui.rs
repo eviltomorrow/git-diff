@@ -34,6 +34,8 @@ enum Focus {
     Diff,
 }
 
+const FOLD_MIN: usize = 10;
+
 pub struct App<'a> {
     facade: GitFacade<'a>,
     repo_path: PathBuf,
@@ -48,7 +50,10 @@ pub struct App<'a> {
     diff_file: Option<ChangedFile>,
     diff_vscroll: usize,
     diff_hscroll: usize,
+    diff_cursor: usize,
+    fold_unchanged: bool,
     hunk_idx: usize,
+    hunk_count: usize,
     filter: Option<String>,
     overlay: Option<Overlay>,
     focus: Focus,
@@ -76,7 +81,10 @@ impl<'a> App<'a> {
             diff_file: None,
             diff_vscroll: 0,
             diff_hscroll: 0,
+            diff_cursor: 0,
+            fold_unchanged: false,
             hunk_idx: 0,
+            hunk_count: 0,
             filter: None,
             overlay: None,
             focus: Focus::FileList,
@@ -235,17 +243,20 @@ impl<'a> App<'a> {
             (KeyCode::Tab, _) => self.toggle_focus(),
             (KeyCode::Char('n'), KeyModifiers::NONE) => self.jump_hunk(1),
             (KeyCode::Char('N'), KeyModifiers::NONE) => self.jump_hunk(-1),
+            (KeyCode::Char('z'), KeyModifiers::NONE) => {
+                self.fold_unchanged = !self.fold_unchanged;
+            }
             (KeyCode::Right, KeyModifiers::CONTROL) => self.scroll_horizontal(1),
             (KeyCode::Left, KeyModifiers::CONTROL) => self.scroll_horizontal(-1),
-            (KeyCode::Char('k'), KeyModifiers::CONTROL) => self.scroll_diff(-1),
-            (KeyCode::Char('j'), KeyModifiers::CONTROL) => self.scroll_diff(1),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL) => self.move_diff_cursor(-1),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL) => self.move_diff_cursor(1),
             (KeyCode::Up, _) => match self.focus {
                 Focus::FileList => self.move_cursor(-1),
-                Focus::Diff => self.scroll_diff(-1),
+                Focus::Diff => self.move_diff_cursor(-1),
             },
             (KeyCode::Down, _) => match self.focus {
                 Focus::FileList => self.move_cursor(1),
-                Focus::Diff => self.scroll_diff(1),
+                Focus::Diff => self.move_diff_cursor(1),
             },
             (KeyCode::Right, _) => match self.focus {
                 Focus::FileList => self.expand_dir(),
@@ -257,11 +268,11 @@ impl<'a> App<'a> {
             },
             (KeyCode::PageUp, _) => match self.focus {
                 Focus::FileList => self.move_cursor(-(self.list_page() as isize)),
-                Focus::Diff => self.scroll_diff(-(self.diff_page() as isize)),
+                Focus::Diff => self.move_diff_cursor(-(self.diff_page() as isize)),
             },
             (KeyCode::PageDown, _) => match self.focus {
                 Focus::FileList => self.move_cursor(self.list_page() as isize),
-                Focus::Diff => self.scroll_diff(self.diff_page() as isize),
+                Focus::Diff => self.move_diff_cursor(self.diff_page() as isize),
             },
             (KeyCode::Char(c), KeyModifiers::NONE) => {
                 if let Some(filter) = &mut self.filter {
@@ -385,12 +396,36 @@ impl<'a> App<'a> {
         self.diff_viewport.max(1)
     }
 
-    fn scroll_diff(&mut self, delta: isize) {
-        let viewport = self.diff_viewport.max(1);
-        let max = self.diff_rows.len().saturating_sub(viewport);
-        let new = (self.diff_vscroll as isize + delta).clamp(0, max as isize);
-        self.diff_vscroll = new as usize;
+    fn move_diff_cursor(&mut self, delta: isize) {
+        if self.diff_rows.is_empty() {
+            return;
+        }
+        let len = self.diff_rows.len() as isize;
+        let new = (self.diff_cursor as isize + delta).clamp(0, len - 1) as usize;
+        if new != self.diff_cursor {
+            self.diff_cursor = new;
+        }
+        self.keep_cursor_visible();
         self.sync_hunk_idx();
+    }
+
+    fn is_unchanged_row(&self, idx: usize) -> bool {
+        self.diff_rows
+            .get(idx)
+            .map(|r| {
+                r.original.as_ref().map(|c| c.kind == LineKind::Equal).unwrap_or(false)
+                    && r.changed.as_ref().map(|c| c.kind == LineKind::Equal).unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    fn keep_cursor_visible(&mut self) {
+        let viewport = self.diff_viewport.max(1);
+        if self.diff_cursor < self.diff_vscroll {
+            self.diff_vscroll = self.diff_cursor;
+        } else if self.diff_cursor >= self.diff_vscroll + viewport {
+            self.diff_vscroll = self.diff_cursor + 1 - viewport;
+        }
     }
 
     fn scroll_horizontal(&mut self, delta: isize) {
@@ -406,23 +441,26 @@ impl<'a> App<'a> {
         if starts.is_empty() {
             return;
         }
-        let cur = self.diff_vscroll;
+        let cur = self.diff_cursor;
         let target = if dir > 0 {
             starts.iter().find(|&&s| s > cur).copied().unwrap_or(cur)
         } else {
             starts.iter().rev().find(|&&s| s < cur).copied().unwrap_or(cur)
         };
         if target != cur {
-            self.diff_vscroll = target;
+            self.diff_cursor = target;
+            self.keep_cursor_visible();
             self.sync_hunk_idx();
         }
     }
 
     fn sync_hunk_idx(&mut self) {
         let starts = hunk_starts(&self.diff_rows);
+        self.hunk_count = starts.len();
+        let cursor_row = self.diff_cursor;
         self.hunk_idx = starts
             .iter()
-            .position(|&s| s <= self.diff_vscroll)
+            .position(|&s| s <= cursor_row)
             .map(|i| i + 1)
             .unwrap_or(0);
     }
@@ -458,6 +496,7 @@ impl<'a> App<'a> {
                         self.diff_file = Some(file);
                         self.diff_vscroll = 0;
                         self.diff_hscroll = 0;
+                        self.diff_cursor = 0;
                         self.sync_hunk_idx();
                     }
                     Err(e) => {
@@ -756,39 +795,151 @@ impl<'a> App<'a> {
         frame.render_widget(block, area);
 
         let height = inner.height.saturating_sub(1) as usize;
-        let start = self.diff_vscroll;
-        for i in 0..height {
-            let idx = start + i;
-            if idx >= self.diff_rows.len() {
+        let content_w = inner.width.saturating_sub(10) as usize;
+        let row_rect_w = inner.width.saturating_sub(2);
+
+        let mut real = self.diff_vscroll;
+        let mut screen = 0usize;
+        while screen < height && real < self.diff_rows.len() {
+            // fold long unchanged runs (unless cursor is inside)
+            if self.fold_unchanged && self.is_unchanged_row(real) {
+                let mut start = real;
+                while start > 0 && self.is_unchanged_row(start - 1) {
+                    start -= 1;
+                }
+                let mut end = real;
+                while end < self.diff_rows.len() && self.is_unchanged_row(end) {
+                    end += 1;
+                }
+                let run_len = end - start;
+                let cursor_in_run = self.diff_cursor >= start && self.diff_cursor < end;
+                if real == start && run_len > FOLD_MIN && !cursor_in_run {
+                    self.render_diff_row(frame, inner, content_w, start, screen, is_original);
+                    screen += 1;
+                    if screen >= height {
+                        break;
+                    }
+                    let marker = format!("⋯ {} 行未改动", run_len - 2);
+                    let line = Line::from(vec![
+                        Span::styled(format!("{:>3} ", ""), Style::default().fg(styles::DIM)),
+                        Span::styled(" ", Style::default().fg(styles::DIM)),
+                        Span::styled(marker, Style::default().fg(styles::DIM)),
+                    ]);
+                    frame.render_widget(
+                        line,
+                        Rect { x: inner.x + 1, y: inner.y + 1 + screen as u16, width: row_rect_w, height: 1 },
+                    );
+                    screen += 1;
+                    real = end - 1; // last line of run shown next
+                    continue;
+                }
+            }
+            self.render_diff_row(frame, inner, content_w, real, screen, is_original);
+            screen += 1;
+            real += 1;
+        }
+    }
+
+    fn render_diff_row(
+        &mut self,
+        frame: &mut Frame,
+        inner: Rect,
+        content_w: usize,
+        real: usize,
+        screen: usize,
+        is_original: bool,
+    ) {
+        let row = &self.diff_rows[real];
+        let cell = if is_original { &row.original } else { &row.changed };
+        let Some(cell) = cell else { return };
+        let kind = cell.kind;
+        let marker = match kind {
+            LineKind::Delete => "-",
+            LineKind::Insert => "+",
+            LineKind::Equal => " ",
+        };
+        let (fg, bg, emph_bg) = match kind {
+            LineKind::Delete => (Color::Red, styles::DEL_BG, styles::INLINE_DEL_BG),
+            LineKind::Insert => (Color::Green, styles::ADD_BG, styles::INLINE_ADD_BG),
+            LineKind::Equal => (Color::White, Color::Reset, Color::Reset),
+        };
+        let is_cursor = self.focus == Focus::Diff && real == self.diff_cursor;
+        let mut spans = self.content_spans(cell, is_original, fg, bg, emph_bg, content_w);
+        let line_num = format!("{:>3} ", cell.num);
+        if is_cursor {
+            spans.insert(0, Span::styled(line_num, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+            spans.insert(1, Span::styled(marker, Style::default().fg(fg).add_modifier(Modifier::BOLD).bg(styles::CURSOR_BG)));
+            // give every content span the cursor background
+            for s in spans.iter_mut().skip(2) {
+                let st = s.style;
+                let content = s.content.clone();
+                *s = Span::styled(content, st.bg(styles::CURSOR_BG));
+            }
+        } else {
+            spans.insert(0, Span::styled(line_num, Style::default().fg(styles::DIM)));
+            spans.insert(1, Span::styled(marker, Style::default().fg(fg).add_modifier(Modifier::BOLD)));
+        }
+        let line = Line::from(spans);
+        let y = inner.y + 1 + screen as u16;
+        frame.render_widget(line, Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 });
+    }
+
+    /// Builds content spans for a diff cell, handling inline fragments,
+    /// horizontal scroll, truncation and trailing-whitespace highlight.
+    fn content_spans(
+        &self,
+        cell: &crate::align::Cell,
+        _is_original: bool,
+        fg: Color,
+        bg: Color,
+        emph_bg: Color,
+        avail: usize,
+    ) -> Vec<Span<'static>> {
+        let frags: Vec<(bool, String)> = match &cell.inline {
+            Some(inline) => inline.iter().map(|(e, t)| (*e, t.clone())).collect(),
+            None => vec![(false, cell.text.clone())],
+        };
+        let mut skip = self.diff_hscroll;
+        let mut out: Vec<Span<'static>> = Vec::new();
+        let mut used = 0usize;
+        for (emph, text) in frags {
+            let tw = UnicodeWidthStr::width(text.as_str());
+            if tw <= skip {
+                skip -= tw;
+                continue;
+            }
+            let seg = &text[char_offset_at_width(&text, skip)..];
+            skip = 0;
+            let seg_w = UnicodeWidthStr::width(seg);
+            let remaining = avail.saturating_sub(used);
+            let style = if emph {
+                Style::default().fg(fg).add_modifier(Modifier::BOLD).bg(emph_bg)
+            } else {
+                Style::default().fg(fg).bg(bg)
+            };
+            if seg_w > remaining {
+                out.push(Span::styled(truncate(seg, remaining), style));
                 break;
             }
-            let row = &self.diff_rows[idx];
-            let cell = if is_original { &row.original } else { &row.changed };
-            let cell = match cell {
-                Some(c) => c,
-                None => continue,
-            };
-            let kind = cell.kind;
-            let marker = match kind {
-                LineKind::Delete => "-",
-                LineKind::Insert => "+",
-                LineKind::Equal => " ",
-            };
-            let (fg, bg) = match kind {
-                LineKind::Delete => (Color::Red, styles::DEL_BG),
-                LineKind::Insert => (Color::Green, styles::ADD_BG),
-                LineKind::Equal => (Color::White, Color::Reset),
-            };
-            let avail = inner.width.saturating_sub(8) as usize;
-            let content = slice_after_hscroll(&cell.text, self.diff_hscroll);
-            let content = truncate(&content, avail);
-            let line = Line::from(vec![
-                Span::styled(format!("{:>3} ", cell.num), Style::default().fg(styles::DIM)),
-                Span::styled(marker, Style::default().fg(fg).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {}", content), Style::default().fg(fg).bg(bg)),
-            ]);
-            frame.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
+            out.push(Span::styled(seg.to_string(), style));
+            used += seg_w;
+            if used >= avail {
+                break;
+            }
         }
+        // highlight trailing whitespace in the final rendered text
+        if let Some(last) = out.last_mut() {
+            let text = last.content.as_ref();
+            let ws_start = text.trim_end_matches([' ', '\t']).len();
+            if ws_start < text.len() {
+                let clean: String = text[..ws_start].to_string();
+                let ws: String = text[ws_start..].to_string();
+                let base = last.style;
+                last.content = clean.into();
+                out.push(Span::styled(ws, base.bg(styles::TRAILING_WS_BG)));
+            }
+        }
+        out
     }
 
     fn render_scrollbar(&mut self, frame: &mut Frame, pane: Rect) {
@@ -856,6 +1007,20 @@ impl<'a> App<'a> {
                 format!("+{} -{}", f.added, f.deleted),
                 Style::default().fg(Color::DarkGray),
             ));
+            if self.hunk_count > 0 {
+                spans.push(Span::styled(" │ ", styles::status_sep_style()));
+                spans.push(Span::styled(
+                    format!("hunk {}/{}", self.hunk_idx, self.hunk_count),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+            if !self.diff_rows.is_empty() {
+                spans.push(Span::styled(" │ ", styles::status_sep_style()));
+                spans.push(Span::styled(
+                    format!("行 {}/{}", self.diff_cursor + 1, self.diff_rows.len()),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         } else {
             spans.push(Span::styled("select a file", Style::default().fg(styles::DIM)));
         }
@@ -868,6 +1033,7 @@ impl<'a> App<'a> {
             key_hint("1/2/3"),
             key_hint("/"),
             key_hint("n/N"),
+            key_hint("z"),
             key_hint("r"),
             key_hint("?"),
             key_hint("q"),
@@ -1030,10 +1196,11 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
             Group {
                 title: "对比区",
                 rows: &[
-                    ("↑↓", "逐行滚动"),
+                    ("↑↓", "移动当前行"),
                     ("PgUp/PgDn", "按页滚动"),
                     ("→ / ←", "水平滚动"),
                     ("n / N", "跳转 hunk"),
+                    ("z", "折叠/展开未改动段"),
                 ],
             },
         ];
@@ -1142,20 +1309,19 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", out)
 }
 
-fn slice_after_hscroll(s: &str, hscroll: usize) -> String {
-    if hscroll == 0 {
-        return s.to_string();
+fn char_offset_at_width(s: &str, width: usize) -> usize {
+    if width == 0 {
+        return 0;
     }
     let mut acc = 0;
-    let mut out = String::new();
-    for c in s.chars() {
+    for (i, c) in s.char_indices() {
         let cw = UnicodeWidthStr::width(c.to_string().as_str());
-        if acc >= hscroll {
-            out.push(c);
+        if acc + cw > width {
+            return i;
         }
         acc += cw;
     }
-    out
+    s.len()
 }
 
 fn pad_right(s: &str, width: usize) -> String {

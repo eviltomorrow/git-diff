@@ -1,4 +1,4 @@
-use similar::{DiffTag, TextDiff};
+use similar::{ChangeTag, DiffTag, TextDiff};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {
@@ -12,6 +12,9 @@ pub struct Cell {
     pub num: u64,
     pub text: String,
     pub kind: LineKind,
+    /// Optional inline fragments for Delete/Insert cells on a paired replace:
+    /// `(emphasized, text)` where emphasized means "changed within the line".
+    pub inline: Option<Vec<(bool, String)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +22,9 @@ pub struct AlignedRow {
     pub original: Option<Cell>,
     pub changed: Option<Cell>,
 }
+
+/// Inline fragments for a changed line: `(emphasized, text)`.
+pub type InlineFragments = Vec<(bool, String)>;
 
 fn to_text(content: Option<&[u8]>) -> String {
     match content {
@@ -59,11 +65,13 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                                 num: old_num,
                                 text: o.clone(),
                                 kind: LineKind::Equal,
+                                inline: None,
                             }),
                             changed: Some(Cell {
                                 num: new_num,
                                 text: n.clone(),
                                 kind: LineKind::Equal,
+                                inline: None,
                             }),
                         });
                     }
@@ -76,6 +84,7 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                                 num: old_num,
                                 text: o.clone(),
                                 kind: LineKind::Delete,
+                                inline: None,
                             }),
                             changed: None,
                         });
@@ -90,6 +99,7 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                                 num: new_num,
                                 text: n.clone(),
                                 kind: LineKind::Insert,
+                                inline: None,
                             }),
                         });
                     }
@@ -101,16 +111,20 @@ DiffTag::Replace => {
                     for k in 0..pairs {
                         old_num += 1;
                         new_num += 1;
+                        let (old_inline, new_inline) =
+                            inline_fragments(&old_slice[k], &new_slice[k]);
                         rows.push(AlignedRow {
                             original: Some(Cell {
                                 num: old_num,
                                 text: old_slice[k].clone(),
                                 kind: LineKind::Delete,
+                                inline: old_inline,
                             }),
                             changed: Some(Cell {
                                 num: new_num,
                                 text: new_slice[k].clone(),
                                 kind: LineKind::Insert,
+                                inline: new_inline,
                             }),
                         });
                     }
@@ -121,6 +135,7 @@ DiffTag::Replace => {
                                 num: old_num,
                                 text: o.clone(),
                                 kind: LineKind::Delete,
+                                inline: None,
                             }),
                             changed: None,
                         });
@@ -133,6 +148,7 @@ DiffTag::Replace => {
                                 num: new_num,
                                 text: n.clone(),
                                 kind: LineKind::Insert,
+                                inline: None,
                             }),
                         });
                     }
@@ -140,6 +156,48 @@ DiffTag::Replace => {
         }
     }
     rows
+}
+
+/// Computes inline (word-level) emphasis fragments for a paired old/new line.
+/// Returns `(old_fragments, new_fragments)` where each fragment is
+/// `(emphasized, text)`.
+fn inline_fragments(old: &str, new: &str) -> (Option<InlineFragments>, Option<InlineFragments>) {
+    let diff = TextDiff::from_lines(old, new);
+    let mut old_frags: InlineFragments = Vec::new();
+    let mut new_frags: InlineFragments = Vec::new();
+    let mut used_old = false;
+    let mut used_new = false;
+    for op in diff.ops() {
+        for change in diff.iter_inline_changes(op) {
+            let mut frags: Vec<(bool, String)> = Vec::new();
+            for (emph, val) in change.iter_strings_lossy() {
+                frags.push((emph, val.into_owned()));
+            }
+            match change.tag() {
+                ChangeTag::Equal => {
+                    if !frags.is_empty() {
+                        old_frags.extend(frags.clone());
+                        new_frags.extend(frags);
+                    }
+                }
+                ChangeTag::Delete => {
+                    if !frags.is_empty() {
+                        old_frags.extend(frags);
+                        used_old = true;
+                    }
+                }
+                ChangeTag::Insert => {
+                    if !frags.is_empty() {
+                        new_frags.extend(frags);
+                        used_new = true;
+                    }
+                }
+            }
+        }
+    }
+    let old_inline = if used_old { Some(old_frags) } else { None };
+    let new_inline = if used_new { Some(new_frags) } else { None };
+    (old_inline, new_inline)
 }
 
 fn is_change(row: &AlignedRow) -> bool {
@@ -170,6 +228,7 @@ pub fn plain_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                 num: (i + 1) as u64,
                 text: l.clone(),
                 kind: LineKind::Equal,
+                inline: None,
             }),
             changed: None,
         });
@@ -181,6 +240,7 @@ pub fn plain_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                 num: (i + 1) as u64,
                 text: l.clone(),
                 kind: LineKind::Equal,
+                inline: None,
             }),
         });
     }
@@ -298,5 +358,41 @@ mod tests {
         );
         let starts = hunk_starts(&rows);
         assert_eq!(starts.len(), 2);
+    }
+
+    #[test]
+    fn inline_fragments_mark_changed_words() {
+        let rows = align_rows(
+            Some(b"let x = foo(a, b);\n"),
+            Some(b"let x = foo(c, b);\n"),
+        );
+        assert_eq!(rows.len(), 1);
+        let orig = rows[0].original.as_ref().unwrap();
+        let changed = rows[0].changed.as_ref().unwrap();
+        let inline_old = orig.inline.as_ref().expect("old inline");
+        let inline_new = changed.inline.as_ref().expect("new inline");
+        // changed word is emphasized on each side; shared text is not
+        let old_emphasized: String = inline_old.iter().filter(|(e, _)| *e).map(|(_, t)| t.as_str()).collect();
+        let new_emphasized: String = inline_new.iter().filter(|(e, _)| *e).map(|(_, t)| t.as_str()).collect();
+        assert_eq!(old_emphasized, "foo(a,");
+        assert_eq!(new_emphasized, "foo(c,");
+        // both sides keep the full original/new text across all fragments
+        let old_all: String = inline_old.iter().map(|(_, t)| t.as_str()).collect();
+        let new_all: String = inline_new.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(old_all, "let x = foo(a, b);");
+        assert_eq!(new_all, "let x = foo(c, b);");
+    }
+
+    #[test]
+    fn pure_delete_lines_have_no_inline() {
+        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\n"));
+        assert_eq!(rows[1].original.as_ref().unwrap().inline, None);
+    }
+
+    #[test]
+    fn equal_lines_have_no_inline() {
+        let rows = align_rows(Some(b"a\n"), Some(b"a\n"));
+        assert_eq!(rows[0].original.as_ref().unwrap().inline, None);
+        assert_eq!(rows[0].changed.as_ref().unwrap().inline, None);
     }
 }

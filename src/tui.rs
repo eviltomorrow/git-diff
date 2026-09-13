@@ -16,7 +16,7 @@ use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
 use crate::tree::{self, VisibleRow};
 
-const LIST_RATIO: u16 = 30;
+const LIST_RATIO: u16 = 22;
 const LINE_LIMIT: usize = 50_000;
 
 fn line_count(content: &[u8]) -> usize {
@@ -499,22 +499,23 @@ impl<'a> App<'a> {
         }
 
         const MARKER_W: usize = 2;
-        const STATUS_W: usize = 6;
-        const PLUS_W: usize = 5;
-        const MINUS_W: usize = 5;
+        const STATUS_W: usize = 4;
+        const PLUS_W: usize = 4;
+        const MINUS_W: usize = 4;
+        const GAP: usize = 1;
         let name_w = inner
             .width
-            .saturating_sub((MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3) as u16) as usize;
+            .saturating_sub((MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3 * GAP) as u16) as usize;
 
         let header = Line::from(vec![
             Span::raw(" ".repeat(MARKER_W)),
-            Span::styled(pad_right("Status", STATUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
             Span::styled(pad_right("Name", name_w), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
             Span::styled(pad_left("+", PLUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
             Span::styled(pad_left("-", MINUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(pad_left("St", STATUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
         ]);
         f.render_widget(header, Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
         f.render_widget(
@@ -544,9 +545,9 @@ impl<'a> App<'a> {
     }
 
     fn render_list_row(&mut self, f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool, name_w: usize) {
-        const STATUS_W: usize = 6;
-        const PLUS_W: usize = 5;
-        const MINUS_W: usize = 5;
+        const STATUS_W: usize = 4;
+        const PLUS_W: usize = 4;
+        const MINUS_W: usize = 4;
 
         let selected_style = Style::default()
             .fg(Color::White)
@@ -554,7 +555,7 @@ impl<'a> App<'a> {
             .bg(styles::SELECTED_BG);
         let row_style = if is_selected { selected_style } else { Style::default() };
         let indent = "  ".repeat(row_depth(row));
-        let width = inner.width.saturating_sub(2) as usize;
+        let width = inner.width as usize;
 
         let marker = if is_selected {
             Span::styled("▌ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
@@ -567,8 +568,6 @@ impl<'a> App<'a> {
                 let collapse = if *collapsed { "▸" } else { "▾" };
                 Line::from(vec![
                     marker,
-                    Span::styled(pad_right("", STATUS_W), Style::default()),
-                    Span::raw(" "),
                     Span::styled(
                         truncate(&format!("{} {} 📁 {}", collapse, indent, short_name(path)), name_w),
                         if is_selected { row_style.fg(Color::Yellow) } else { Style::default().fg(styles::DIR_FG) },
@@ -577,6 +576,8 @@ impl<'a> App<'a> {
                     Span::styled(pad_left("", PLUS_W), Style::default().fg(styles::DIM)),
                     Span::raw(" "),
                     Span::styled(pad_left("", MINUS_W), Style::default().fg(styles::DIM)),
+                    Span::raw(" "),
+                    Span::styled(pad_left("", STATUS_W), Style::default()),
                 ])
             }
             VisibleRow::File { file, .. } => {
@@ -591,8 +592,6 @@ impl<'a> App<'a> {
                 let minus = format!("-{}", file.deleted);
                 Line::from(vec![
                     marker,
-                    Span::styled(pad_right(status, STATUS_W), status_style),
-                    Span::raw(" "),
                     Span::styled(
                         truncate(&format!("{}{}", indent, name), name_w),
                         if is_selected { row_style.fg(Color::White) } else { Style::default().fg(Color::White) },
@@ -607,10 +606,12 @@ impl<'a> App<'a> {
                         pad_left(&minus, MINUS_W),
                         if is_selected { row_style } else { Style::default().fg(styles::STATUS_ERR) },
                     ),
+                    Span::raw(" "),
+                    Span::styled(pad_left(status, STATUS_W), status_style),
                 ])
             }
         };
-        f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 2 + y, width: width as u16, height: 1 });
+        f.render_widget(line, Rect { x: inner.x, y: inner.y + 2 + y, width: width as u16, height: 1 });
     }
 
     fn render_diffview(&mut self, frame: &mut Frame, area: Rect) {

@@ -462,6 +462,9 @@ impl<'a> App<'a> {
         } else {
             starts.iter().rev().find(|&&s| s < cur).copied().unwrap_or(cur)
         };
+        // hunk navigation targets the diff panel: bring focus there so the
+        // cursor highlight is visible even when navigating from the file list
+        self.focus = Focus::Diff;
         if target != cur {
             self.diff_cursor = target;
             self.keep_cursor_visible();

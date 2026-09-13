@@ -189,6 +189,57 @@ fn set_focus_switches_panels() {
 }
 
 #[test]
+fn goto_line_jumps_diff_cursor() {
+    let mut ctrl = setup();
+    // select a file so diff_rows loads (lib.rs has 2 rows: x, y)
+    ctrl.handle_key(key(KeyCode::Down)); // to lib.rs
+    assert!(!ctrl.diff_rows.is_empty());
+    let total = ctrl.diff_rows.len();
+    assert!(total >= 2);
+    ctrl.handle_key(key(KeyCode::Char('g')));
+    ctrl.handle_key(key(KeyCode::Char('2')));
+    ctrl.handle_key(key(KeyCode::Enter));
+    assert_eq!(ctrl.diff_cursor, 1);
+    assert_eq!(ctrl.focus, Focus::Diff);
+    // goto clamps to the last row
+    ctrl.handle_key(key(KeyCode::Char('g')));
+    for ch in format!("{}", total + 100).chars() {
+        ctrl.handle_key(key(KeyCode::Char(ch)));
+    }
+    ctrl.handle_key(key(KeyCode::Enter));
+    assert_eq!(ctrl.diff_cursor, total - 1);
+}
+
+#[test]
+fn search_jumps_to_matching_row() {
+    let mut ctrl = setup();
+    ctrl.handle_key(key(KeyCode::Down)); // to lib.rs
+    assert!(!ctrl.diff_rows.is_empty());
+    // lib.rs content is "x\ny\n" (original only); search "y" hits row 1
+    ctrl.handle_key(key(KeyCode::Char('f')));
+    ctrl.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(ctrl.focus, Focus::Diff);
+    let hit = ctrl.diff_rows[ctrl.diff_cursor]
+        .original
+        .as_ref()
+        .map(|c| c.text.as_str())
+        .unwrap_or("");
+    assert!(hit.contains('y'));
+    ctrl.handle_key(key(KeyCode::Esc));
+    assert!(ctrl.search.is_none());
+}
+
+#[test]
+fn ignore_whitespace_toggle_reloads_diff() {
+    let mut ctrl = setup();
+    assert!(!ctrl.ignore_whitespace);
+    ctrl.handle_key(key(KeyCode::Char('w')));
+    assert!(ctrl.ignore_whitespace);
+    ctrl.handle_key(key(KeyCode::Char('w')));
+    assert!(!ctrl.ignore_whitespace);
+}
+
+#[test]
 fn collapse_all_then_expand_all() {
     let mut ctrl = setup_nested();
     // dirs visible initially: src, src/deep, top.rs

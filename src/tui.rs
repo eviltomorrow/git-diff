@@ -460,7 +460,7 @@ fn render_diff_row(
         LineKind::Equal => (Color::White, Color::Reset, Color::Reset),
     };
     let is_cursor = ctrl.focus == Focus::Diff && real == ctrl.diff_cursor;
-    let mut spans = content_spans(cell, fg, bg, emph_bg, content_w, ctrl.diff_hscroll);
+    let mut spans = content_spans(cell, fg, bg, emph_bg, content_w, ctrl.diff_hscroll, ctrl.search.as_deref());
     let line_num = format!("{:>3} ", cell.num);
     let marker_color = match kind {
         LineKind::Delete => Color::Red,
@@ -494,6 +494,7 @@ fn content_spans(
     emph_bg: Color,
     avail: usize,
     hscroll: usize,
+    search: Option<&str>,
 ) -> Vec<Span<'static>> {
     let frags: Vec<(bool, String)> = match &cell.inline {
         Some(inline) => inline.iter().map(|(e, t)| (*e, t.clone())).collect(),
@@ -528,6 +529,52 @@ fn content_spans(
         if used >= avail {
             break;
         }
+    }
+    // highlight search matches within the rendered text
+    if let Some(query) = search
+        && !query.is_empty()
+        && !out.is_empty()
+    {
+        let q = query.to_lowercase();
+        let mut expanded: Vec<Span<'static>> = Vec::new();
+        for span in out {
+            let text = span.content.as_ref();
+            let lower = text.to_lowercase();
+            let mut start = 0;
+            let mut rest = lower.as_str();
+            let base = span.style;
+            loop {
+                match rest.find(&q) {
+                    Some(pos) => {
+                        let match_start = start + pos;
+                        let match_end = match_start + q.len();
+                        if match_start > start {
+                            expanded.push(Span::styled(
+                                text[start..match_start].to_string(),
+                                base,
+                            ));
+                        }
+                        expanded.push(Span::styled(
+                            text[match_start..match_end].to_string(),
+                            base.bg(styles::SEARCH_BG),
+                        ));
+                        start = match_end;
+                        rest = &lower[match_end..];
+                        // avoid matching empty query at end
+                        if match_end >= lower.len() {
+                            break;
+                        }
+                    }
+                    None => {
+                        if start < text.len() {
+                            expanded.push(Span::styled(text[start..].to_string(), base));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        out = expanded;
     }
     // highlight trailing whitespace in the final rendered text
     if let Some(last) = out.last_mut() {
@@ -624,6 +671,15 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
                 format!("行 {}/{}", ctrl.diff_cursor + 1, ctrl.diff_rows.len()),
                 Style::default().fg(Color::DarkGray),
             ));
+            let pct = ((ctrl.diff_cursor + 1) * 100) / ctrl.diff_rows.len();
+            left.push(Span::styled(
+                format!(" ({pct}%)"),
+                Style::default().fg(styles::DIM),
+            ));
+        }
+        if ctrl.ignore_whitespace {
+            left.push(Span::styled(" │ ", styles::status_sep_style()));
+            left.push(Span::styled("忽略空白", Style::default().fg(Color::Yellow)));
         }
         if ctrl.fold_unchanged {
             left.push(Span::styled(" │ ", styles::status_sep_style()));
@@ -656,8 +712,22 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         ));
         right.push(Span::styled("│ [Esc]", styles::key_style()));
         right.push(Span::styled("取消", Style::default().fg(styles::DIM)));
+    } else if let Some(g) = &ctrl.goto {
+        left.push(Span::styled(" │ ", styles::status_sep_style()));
+        left.push(Span::styled(
+            format!("跳到行: {}", g),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+        right.push(Span::styled("│ [Enter]跳转 [Esc]取消", styles::key_style()));
+    } else if let Some(q) = &ctrl.search {
+        left.push(Span::styled(" │ ", styles::status_sep_style()));
+        left.push(Span::styled(
+            format!("搜索: {}", q),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+        right.push(Span::styled("│ [Esc]结束", styles::key_style()));
     } else {
-        let hints: [(&str, &str); 12] = [
+        let hints: [(&str, &str); 15] = [
             ("Tab", "焦点"),
             ("Enter", "查看对比"),
             ("↑↓", "移动"),
@@ -665,6 +735,9 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
             ("1/2/3/4", "模式"),
             ("l", "换一个 commit"),
             ("/", "过滤"),
+            ("g", "跳转行"),
+            ("f", "搜索diff"),
+            ("w", "忽略空白"),
             ("s", "排序"),
             ("n/m", "hunk"),
             ("z", "折叠"),
@@ -842,6 +915,9 @@ fn render_help(f: &mut Frame, area: Rect) {
                 ("PgUp/PgDn", "按页滚动"),
                 ("→ / ←", "水平滚动"),
                 ("n / m", "跳转下一个/上一个 hunk"),
+                ("g", "输入行号跳转"),
+                ("f", "在 diff 内搜索文本"),
+                ("w", "忽略 / 恢复空白变化"),
                 ("z", "折叠/展开未改动段"),
             ],
         },
@@ -1093,6 +1169,9 @@ mod width_check {
                     ("PgUp/PgDn", "按页滚动"),
                     ("→ / ←", "水平滚动"),
                     ("n / m", "跳转下一个/上一个 hunk"),
+                    ("g", "输入行号跳转"),
+                    ("f", "在 diff 内搜索文本"),
+                    ("w", "忽略 / 恢复空白变化"),
                 ],
             },
         ];

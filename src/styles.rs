@@ -28,6 +28,8 @@ pub const INLINE_DEL_BG: Color = Color::Rgb(175, 62, 60);
 pub const TRAILING_WS_BG: Color = Color::Rgb(150, 90, 40);
 /// Background for the current diff cursor line.
 pub const CURSOR_BG: Color = Color::Rgb(40, 50, 70);
+/// Background for diff-internal search matches (`f`).
+pub const SEARCH_BG: Color = Color::Rgb(90, 70, 20);
 
 pub fn status_fg(status: crate::model::Status) -> Color {
     match status {

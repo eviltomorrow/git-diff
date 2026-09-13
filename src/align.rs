@@ -43,12 +43,31 @@ fn to_lines(content: Option<&[u8]>) -> Vec<String> {
     }
 }
 
-pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<AlignedRow> {
+/// Strips trailing whitespace from every line without changing the line
+/// count, so diff ops still index into the original line arrays.
+fn trim_end_all(text: &str) -> String {
+    text.lines()
+        .map(|l| l.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Aligns two file contents into side-by-side rows.
+///
+/// When `ignore_whitespace` is true, trailing whitespace is stripped from
+/// lines *before* diffing, but the original line text is kept for display.
+pub fn align_rows(
+    original: Option<&[u8]>,
+    changed: Option<&[u8]>,
+    ignore_whitespace: bool,
+) -> Vec<AlignedRow> {
     let old_text = to_text(original);
     let new_text = to_text(changed);
     let old_lines = to_lines(original);
     let new_lines = to_lines(changed);
-    let diff = TextDiff::from_lines(&old_text, &new_text);
+    let diff_text_old = if ignore_whitespace { trim_end_all(&old_text) } else { old_text.clone() };
+    let diff_text_new = if ignore_whitespace { trim_end_all(&new_text) } else { new_text.clone() };
+    let diff = TextDiff::from_lines(&diff_text_old, &diff_text_new);
     let mut rows = Vec::new();
     let mut old_num: u64 = 0;
     let mut new_num: u64 = 0;
@@ -296,7 +315,7 @@ mod tests {
 
     #[test]
     fn equal_lines_align_both_sides() {
-        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\nb\n"));
+        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\nb\n"), false);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.original.is_some() && r.changed.is_some()));
         assert_eq!(rows[0].original.as_ref().unwrap().num, 1);
@@ -306,7 +325,7 @@ mod tests {
 
     #[test]
     fn insert_lines_have_no_original() {
-        let rows = align_rows(Some(b"a\n"), Some(b"a\nb\n"));
+        let rows = align_rows(Some(b"a\n"), Some(b"a\nb\n"), false);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].original, None);
         assert_eq!(rows[1].changed.as_ref().unwrap().text, "b");
@@ -315,7 +334,7 @@ mod tests {
 
     #[test]
     fn delete_lines_have_no_changed() {
-        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\n"));
+        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\n"), false);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].changed, None);
         assert_eq!(rows[1].original.as_ref().unwrap().text, "b");
@@ -324,7 +343,7 @@ mod tests {
 
     #[test]
     fn modified_line_aligns_both_sides() {
-        let rows = align_rows(Some(b"foo()\n"), Some(b"bar()\n"));
+        let rows = align_rows(Some(b"foo()\n"), Some(b"bar()\n"), false);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].original.as_ref().unwrap().text, "foo()");
         assert_eq!(rows[0].original.as_ref().unwrap().kind, LineKind::Delete);
@@ -337,7 +356,7 @@ mod tests {
     #[test]
     fn replaced_block_pairs_then_spills() {
         // 2 old lines replaced by 3 new: 2 aligned pairs + 1 extra insert
-        let rows = align_rows(Some(b"x\ny\nz\n"), Some(b"a\nb\nc\nd\n"));
+        let rows = align_rows(Some(b"x\ny\nz\n"), Some(b"a\nb\nc\nd\n"), false);
         // x→a, y→b paired; z deleted; c,d inserted => need to check content
         let origs: Vec<(u64, &str, LineKind)> = rows
             .iter()
@@ -365,9 +384,9 @@ mod tests {
 
     #[test]
     fn empty_sides_produce_no_rows() {
-        assert!(!align_rows(None, Some(b"a\n")).is_empty());
-        assert!(!align_rows(Some(b"a\n"), None).is_empty());
-        assert!(align_rows(None, None).is_empty());
+        assert!(!align_rows(None, Some(b"a\n"), false).is_empty());
+        assert!(!align_rows(Some(b"a\n"), None, false).is_empty());
+        assert!(align_rows(None, None, false).is_empty());
     }
 
     #[test]
@@ -375,6 +394,7 @@ mod tests {
         let rows = align_rows(
             Some(b"a\nb\nfoo()\nc\n"),
             Some(b"a\nb\nbar()\nc\n"),
+            false,
         );
         let starts = hunk_starts(&rows);
         assert_eq!(starts.len(), 1);
@@ -386,6 +406,7 @@ mod tests {
         let rows = align_rows(
             Some(b"a\nb\nc\n"),
             Some(b"a\nx\nc\n"),
+            false,
         );
         let originals: Vec<u64> = rows.iter().filter_map(|r| r.original.as_ref().map(|c| c.num)).collect();
         let changed: Vec<u64> = rows.iter().filter_map(|r| r.changed.as_ref().map(|c| c.num)).collect();
@@ -398,6 +419,7 @@ mod tests {
         let rows = align_rows(
             Some(b"a\nb\nc\nd\ne\nf\n"),
             Some(b"a\nB\nc\nd\nE\nf\n"),
+            false,
         );
         let starts = hunk_starts(&rows);
         assert_eq!(starts.len(), 2);
@@ -419,6 +441,7 @@ mod tests {
         let rows = align_rows(
             Some(b"a\nb\nc\nd\ne\nf\n"),
             Some(b"a\nB\nc\nd\nE\nf\n"),
+            false,
         );
         // rows: a(0 equal), B(1 change), c(2), d(3), E(4 change), f(5)
         let runs = fold_runs(&rows);
@@ -431,7 +454,7 @@ mod tests {
 
     #[test]
     fn fold_runs_empty_for_all_changed() {
-        let rows = align_rows(Some(b"a\nb\n"), Some(b"c\nd\n"));
+        let rows = align_rows(Some(b"a\nb\n"), Some(b"c\nd\n"), false);
         assert!(fold_runs(&rows).is_empty());
     }
 
@@ -440,6 +463,7 @@ mod tests {
         let rows = align_rows(
             Some(b"let x = foo(a, b);\n"),
             Some(b"let x = foo(c, b);\n"),
+            false,
         );
         assert_eq!(rows.len(), 1);
         let orig = rows[0].original.as_ref().unwrap();
@@ -460,14 +484,42 @@ mod tests {
 
     #[test]
     fn pure_delete_lines_have_no_inline() {
-        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\n"));
+        let rows = align_rows(Some(b"a\nb\n"), Some(b"a\n"), false);
         assert_eq!(rows[1].original.as_ref().unwrap().inline, None);
     }
 
     #[test]
     fn equal_lines_have_no_inline() {
-        let rows = align_rows(Some(b"a\n"), Some(b"a\n"));
+        let rows = align_rows(Some(b"a\n"), Some(b"a\n"), false);
         assert_eq!(rows[0].original.as_ref().unwrap().inline, None);
         assert_eq!(rows[0].changed.as_ref().unwrap().inline, None);
+    }
+
+    #[test]
+    fn ignore_whitespace_treats_trailing_space_changes_as_equal() {
+        // "a " vs "a": normally a Replace (1 paired row with change markers);
+        // when ignoring whitespace it must become a plain Equal row.
+        let normal = align_rows(Some(b"a \n"), Some(b"a\n"), false);
+        assert_eq!(normal.len(), 1);
+        assert_eq!(normal[0].original.as_ref().unwrap().kind, LineKind::Delete);
+        assert_eq!(normal[0].changed.as_ref().unwrap().kind, LineKind::Insert);
+
+        let ws = align_rows(Some(b"a \n"), Some(b"a\n"), true);
+        assert_eq!(ws.len(), 1);
+        // both sides equal, no change emphasis
+        assert_eq!(ws[0].original.as_ref().unwrap().kind, LineKind::Equal);
+        assert_eq!(ws[0].changed.as_ref().unwrap().kind, LineKind::Equal);
+        assert_eq!(ws[0].original.as_ref().unwrap().inline, None);
+        // original text preserved for display despite the normalized diff
+        assert_eq!(ws[0].original.as_ref().unwrap().text, "a ");
+        assert_eq!(ws[0].changed.as_ref().unwrap().text, "a");
+    }
+
+    #[test]
+    fn ignore_whitespace_still_diffs_real_changes() {
+        let ws = align_rows(Some(b"foo \n"), Some(b"bar\n"), true);
+        // real content change is still flagged as a change, not Equal
+        assert!(ws.iter().any(|r| r.original.as_ref().is_some_and(|c| c.kind == LineKind::Delete)));
+        assert!(ws.iter().any(|r| r.changed.as_ref().is_some_and(|c| c.kind == LineKind::Insert)));
     }
 }

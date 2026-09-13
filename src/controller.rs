@@ -97,6 +97,12 @@ pub struct Controller<'a> {
     pub hunk_idx: usize,
     pub hunk_count: usize,
     pub filter: Option<String>,
+    /// Diff-internal search buffer (feature `f`), None when not searching.
+    pub search: Option<String>,
+    /// Line-number jump buffer (feature `g`), None when not active.
+    pub goto: Option<String>,
+    /// Skip whitespace-only changes when aligning the diff (`w`).
+    pub ignore_whitespace: bool,
     /// Sibling ordering for the file list.
     pub sort: SortMode,
     pub overlay: Option<Overlay>,
@@ -141,6 +147,9 @@ impl<'a> Controller<'a> {
             hunk_idx: 0,
             hunk_count: 0,
             filter: None,
+            search: None,
+            goto: None,
+            ignore_whitespace: false,
             sort: SortMode::Path,
             overlay: None,
             focus: Focus::FileList,
@@ -320,6 +329,59 @@ impl<'a> Controller<'a> {
                 _ => {}
             }
         }
+        // line-number jump (`g`): collect digits, Enter jumps
+        if self.goto.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char(c), KeyModifiers::NONE) if c.is_ascii_digit() => {
+                    self.goto.as_mut().unwrap().push(c);
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    self.goto.as_mut().unwrap().pop();
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    self.goto = None;
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    let line: usize = self.goto.take().unwrap().parse().unwrap_or(0);
+                    if line > 0 && !self.diff_rows.is_empty() {
+                        self.diff_cursor = (line - 1).min(self.diff_rows.len() - 1);
+                        self.focus = Focus::Diff;
+                        self.keep_cursor_visible();
+                        self.sync_hunk_idx();
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // diff-internal search (`f`): match text in diff rows
+        if self.search.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char(c), KeyModifiers::NONE) => {
+                    self.search.as_mut().unwrap().push(c);
+                    self.jump_to_search_match();
+                    return;
+                }
+                (KeyCode::Backspace, _) => {
+                    self.search.as_mut().unwrap().pop();
+                    self.jump_to_search_match();
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    self.search = None;
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    self.search = None;
+                    self.focus = Focus::Diff;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 // handled by caller to exit
@@ -351,6 +413,13 @@ impl<'a> Controller<'a> {
             (KeyCode::Char('m'), KeyModifiers::NONE) => self.jump_hunk(-1),
             (KeyCode::Char('z'), KeyModifiers::NONE) => {
                 self.fold_unchanged = !self.fold_unchanged;
+            }
+            (KeyCode::Char('w'), KeyModifiers::NONE) => self.toggle_ignore_whitespace(),
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.goto = Some(String::new());
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                self.search = Some(String::new());
             }
             (KeyCode::Char('s'), KeyModifiers::NONE) => self.cycle_sort(),
             (KeyCode::Char('['), KeyModifiers::NONE) => self.collapse_all_dirs(),
@@ -541,6 +610,39 @@ impl<'a> Controller<'a> {
         self.focus = focus;
     }
 
+    fn toggle_ignore_whitespace(&mut self) {
+        self.ignore_whitespace = !self.ignore_whitespace;
+        self.load_diff();
+        self.status = if self.ignore_whitespace {
+            "忽略空白: 开".into()
+        } else {
+            "忽略空白: 关".into()
+        };
+    }
+
+    /// After the search buffer changes, jump the diff cursor to the first row
+    /// (at or after the current cursor) whose text matches.
+    fn jump_to_search_match(&mut self) {
+        let Some(query) = self.search.as_deref().map(str::to_lowercase) else {
+            return;
+        };
+        if query.is_empty() || self.diff_rows.is_empty() {
+            return;
+        }
+        let start = self.diff_cursor;
+        let len = self.diff_rows.len();
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            if row_matches(&self.diff_rows[idx], &query) {
+                self.diff_cursor = idx;
+                self.focus = Focus::Diff;
+                self.keep_cursor_visible();
+                self.sync_hunk_idx();
+                return;
+            }
+        }
+    }
+
     fn cycle_sort(&mut self) {
         self.sort = match self.sort {
             SortMode::Path => SortMode::Status,
@@ -686,7 +788,11 @@ impl<'a> Controller<'a> {
                         } else if big {
                             plain_rows(sides.original.as_deref(), sides.changed.as_deref())
                         } else {
-                            align_rows(sides.original.as_deref(), sides.changed.as_deref())
+                            align_rows(
+                                sides.original.as_deref(),
+                                sides.changed.as_deref(),
+                                self.ignore_whitespace,
+                            )
                         };
                         self.diff_file = Some(file);
                         self.diff_vscroll = 0;
@@ -725,4 +831,17 @@ impl<'a> Controller<'a> {
 
 pub fn line_count(content: &[u8]) -> usize {
     content.iter().filter(|&&b| b == b'\n').count() + 1
+}
+
+/// Whether either side of a diff row contains the (lowercased) query.
+fn row_matches(row: &AlignedRow, query: &str) -> bool {
+    row.original
+        .as_ref()
+        .map(|c| c.text.to_lowercase().contains(query))
+        .unwrap_or(false)
+        || row
+            .changed
+            .as_ref()
+            .map(|c| c.text.to_lowercase().contains(query))
+            .unwrap_or(false)
 }

@@ -236,7 +236,7 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
     let width = inner.width as usize;
 
     let marker = if is_selected {
-        Span::styled("│ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        Span::styled("▌ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     } else {
         Span::raw("  ")
     };
@@ -247,10 +247,15 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
             // only the top-level directories get the folder emoji; nested
             // directories rely on the tree guide + collapse arrow alone
             let icon = if *depth == 0 { "📁 " } else { "" };
+            let guide_w = UnicodeWidthStr::width(guide.as_str());
+            let name_avail = name_w.saturating_sub(guide_w);
             Line::from(vec![
                 marker,
+                // relationship lines stay thin (dim, not bold) even when
+                // the row is selected
+                Span::styled(guide.to_string(), guide_style()),
                 Span::styled(
-                    pad_right(&truncate(&format!("{}{} {}{}", guide, collapse, icon, short_name(path)), name_w), name_w),
+                    pad_right(&truncate(&format!("{} {}{}", collapse, icon, short_name(path)), name_avail), name_avail),
                     row_style.fg(Color::Yellow),
                 ),
                 Span::raw(" "),
@@ -271,10 +276,13 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
             let name = file.path.rsplit('/').next().unwrap_or(&file.path);
             let plus = format!("+{}", file.added);
             let minus = format!("-{}", file.deleted);
+            let guide_w = UnicodeWidthStr::width(guide.as_str());
+            let name_avail = name_w.saturating_sub(guide_w);
             Line::from(vec![
                 marker,
+                Span::styled(guide.to_string(), guide_style()),
                 Span::styled(
-                    pad_right(&truncate(&format!("{}{}", guide, name), name_w), name_w),
+                    pad_right(&truncate(name, name_avail), name_avail),
                     if is_selected { row_style.fg(Color::White) } else { Style::default().fg(Color::White) },
                 ),
                 Span::raw(" "),
@@ -287,6 +295,11 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
         }
     };
     f.render_widget(line, Rect { x: inner.x, y: inner.y + 2 + y, width: width as u16, height: 1 });
+}
+
+/// Relationship lines (├─ └─ │) are always thin: dim, never bold.
+fn guide_style() -> Style {
+    Style::default().fg(styles::DIM)
 }
 
 /// +N / -N columns: zero is dim, small is plain green/red, larger gets

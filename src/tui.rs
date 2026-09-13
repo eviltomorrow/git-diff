@@ -889,7 +889,10 @@ impl<'a> App<'a> {
 
 fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitEntry], cursor: usize) {
         let width = 60u16.min(area.width.saturating_sub(4));
-        let height = (commits.len() as u16 + 5).min(area.height.saturating_sub(4)).max(7);
+        const MAX_ROWS: usize = 20;
+        let height = ((commits.len().min(MAX_ROWS) as u16) + 5)
+            .min(area.height.saturating_sub(4))
+            .max(7);
         let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
         let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
         let panel = Rect { x, y, width, height };
@@ -909,7 +912,9 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
             return;
         }
         let visible = (inner.height.saturating_sub(3)) as usize;
-        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        let max_start = commits.len().saturating_sub(visible);
+        let start = cursor.saturating_sub(visible.saturating_sub(1)).min(max_start);
+        let has_scroll = commits.len() > visible;
         for i in 0..visible {
             let idx = start + i;
             if idx >= commits.len() {
@@ -923,18 +928,57 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
                 Style::default()
             };
             let marker = if selected { "▶" } else { " " };
+            let content_w = inner.width.saturating_sub(2) as usize;
             let line = Line::from(vec![
                 Span::styled(marker, style),
                 Span::styled(format!(" {} ", c.short_hash), style.fg(Color::Cyan)),
-                Span::styled(truncate(&c.title, inner.width.saturating_sub(42) as usize), style),
+                Span::styled(truncate(&c.title, content_w.saturating_sub(42)), style),
                 Span::styled(format!(" {:>12} {}", c.date, c.author), style.fg(styles::DIM)),
+                Span::styled(" ", style),
             ]);
             f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
         }
+        if has_scroll {
+            let scroll_area = Rect {
+                x: inner.x + inner.width.saturating_sub(1),
+                y: inner.y + 1,
+                width: 1,
+                height: inner.height.saturating_sub(3),
+            };
+            self.render_commit_scrollbar(f, scroll_area, commits.len(), visible, start);
+        }
+        let hint = "↑↓ 选择   Enter 确认   Esc 关闭";
+        let hint_w = UnicodeWidthStr::width(hint);
+        let pad = inner.width.saturating_sub(hint_w as u16 + 1);
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled("  ↑↓ 选择   Enter 确认   Esc 关闭", Style::default().fg(styles::DIM)))),
+            Paragraph::new(Line::from(Span::styled(
+                format!("{}{}", " ".repeat(pad as usize), hint),
+                Style::default().fg(styles::DIM),
+            ))),
             Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(2), width: inner.width, height: 1 },
         );
+    }
+
+    fn render_commit_scrollbar(&mut self, f: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
+        let h = area.height as usize;
+        let pos = if total <= visible {
+            0.0
+        } else {
+            (start as f64) / (total - visible) as f64
+        };
+        let size = (visible as f64 / total as f64 * h as f64).max(1.0);
+        let track_start = (pos * (h as f64 - size)).round() as usize;
+        for i in 0..h {
+            let ch = if (i as f64) >= track_start as f64 && (i as f64) < track_start as f64 + size {
+                "█"
+            } else {
+                "░"
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(ch, Style::default().fg(styles::DIM)))),
+                Rect { x: area.x, y: area.y + i as u16, width: 1, height: 1 },
+            );
+        }
     }
 
     fn render_help(&mut self, f: &mut Frame, area: Rect) {

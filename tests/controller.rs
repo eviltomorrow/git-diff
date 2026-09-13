@@ -35,6 +35,29 @@ fn setup() -> Controller<'static> {
     Controller::new(facade, PathBuf::from("/tmp"), true, None).unwrap()
 }
 
+/// Fake git returning nested paths so the tree has dirs.
+struct NestedRunner;
+
+impl GitRunner for NestedRunner {
+    fn run(&self, args: &[&str]) -> anyhow::Result<String> {
+        match args {
+            ["diff", "--numstat", "-M", "HEAD"] => Ok(
+                "1\t0\tsrc/main.rs\n1\t0\tsrc/deep/lib.rs\n1\t0\ttop.rs\n".into(),
+            ),
+            ["diff", "--name-status", "-M", "HEAD"] => Ok(
+                "M\tsrc/main.rs\nM\tsrc/deep/lib.rs\nM\ttop.rs\n".into(),
+            ),
+            ["ls-files", "--others", "--exclude-standard"] => Ok(String::new()),
+            _ => Ok(String::new()),
+        }
+    }
+}
+
+fn setup_nested() -> Controller<'static> {
+    let facade = GitFacade::new(&NestedRunner, &PathBuf::from("/tmp"));
+    Controller::new(facade, PathBuf::from("/tmp"), true, None).unwrap()
+}
+
 #[test]
 fn loads_mode_a_files_and_selects_first() {
     let ctrl = setup();
@@ -109,4 +132,50 @@ fn mode_d_opens_picker_then_loads_commit() {
     assert_eq!(ctrl.mode, ComparisonMode::CommitVsHead);
     assert_eq!(ctrl.selected_commit.as_deref(), Some("abc1234"));
     assert!(ctrl.overlay.is_none());
+}
+
+#[test]
+fn filter_negation_excludes_matches() {
+    let mut ctrl = setup();
+    ctrl.handle_key(key(KeyCode::Char('/')));
+    for ch in ['!', 'm', 'a', 'i', 'n'] {
+        ctrl.handle_key(key(KeyCode::Char(ch)));
+    }
+    let rows = ctrl.visible_rows();
+    assert_eq!(rows.len(), 1, "!main should keep only lib.rs");
+    match &rows[0] {
+        git_diff::tree::VisibleRow::File { file, .. } => assert_eq!(file.path, "lib.rs"),
+        _ => panic!("expected file row"),
+    }
+}
+
+#[test]
+fn sort_cycles_through_modes() {
+    use git_diff::tree::SortMode;
+    let mut ctrl = setup();
+    assert_eq!(ctrl.sort, SortMode::Path);
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(ctrl.sort, SortMode::Status);
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(ctrl.sort, SortMode::Added);
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(ctrl.sort, SortMode::Path);
+}
+
+#[test]
+fn collapse_all_then_expand_all() {
+    let mut ctrl = setup_nested();
+    // dirs visible initially: src, src/deep, top.rs
+    let before = ctrl.visible_rows();
+    assert!(before.iter().any(|r| matches!(r, git_diff::tree::VisibleRow::Dir { .. })));
+    ctrl.handle_key(key(KeyCode::Char('[')));
+    let collapsed = ctrl.visible_rows();
+    // only root dirs remain; nested files hidden
+    assert!(collapsed.iter().any(|r| matches!(r, git_diff::tree::VisibleRow::Dir { .. })));
+    assert!(!collapsed
+        .iter()
+        .any(|r| matches!(r, git_diff::tree::VisibleRow::File { file, .. } if file.path.contains('/'))));
+    ctrl.handle_key(key(KeyCode::Char(']')));
+    let expanded = ctrl.visible_rows();
+    assert!(expanded.len() >= before.len());
 }

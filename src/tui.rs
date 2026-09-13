@@ -17,7 +17,7 @@ use crate::controller::{Controller, Focus, Overlay};
 use crate::git::{GitFacade, GitRunner};
 use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
-use crate::tree::VisibleRow;
+use crate::tree::{SortMode, VisibleRow};
 
 const LIST_RATIO: u16 = 26;
 
@@ -146,9 +146,14 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
     const PLUS_W: usize = 4;
     const MINUS_W: usize = 4;
     const GAP: usize = 1;
+    const SCROLL_W: usize = 1;
+    let list_height = inner.height.saturating_sub(2) as usize;
+    let scrollbar_needed = rows.len() > list_height;
     let name_w = inner
         .width
-        .saturating_sub((MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3 * GAP) as u16) as usize;
+        .saturating_sub(
+            (MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3 * GAP + SCROLL_W * usize::from(scrollbar_needed)) as u16,
+        ) as usize;
 
     let header = Line::from(vec![
         Span::raw(" ".repeat(MARKER_W)),
@@ -166,7 +171,6 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
     );
 
-    let list_height = inner.height.saturating_sub(2) as usize;
     if ctrl.cursor >= rows.len() {
         ctrl.cursor = rows.len().saturating_sub(1);
     }
@@ -185,6 +189,38 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
         let is_selected = idx == ctrl.cursor;
         render_list_row(f, inner, &rows[idx], i as u16, is_selected, name_w);
     }
+
+    if scrollbar_needed {
+        let scroll_area = Rect {
+            x: inner.x + inner.width.saturating_sub(SCROLL_W as u16 + 1),
+            y: inner.y + 2,
+            width: 1,
+            height: list_height as u16,
+        };
+        render_list_scrollbar(f, scroll_area, rows.len(), list_height, ctrl.list_scroll);
+    }
+}
+
+fn render_list_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
+    let h = area.height as usize;
+    let pos = if total <= visible {
+        0.0
+    } else {
+        (start as f64) / (total - visible) as f64
+    };
+    let size = (visible as f64 / total as f64 * h as f64).max(1.0);
+    let track_start = (pos * (h as f64 - size)).round() as usize;
+    for i in 0..h {
+        let ch = if (i as f64) >= track_start as f64 && (i as f64) < track_start as f64 + size {
+            "█"
+        } else {
+            "░"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(ch, Style::default().fg(styles::DIM)))),
+            Rect { x: area.x, y: area.y + i as u16, width: 1, height: 1 },
+        );
+    }
 }
 
 fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool, name_w: usize) {
@@ -194,39 +230,39 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
 
     let selected_style = Style::default()
         .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .bg(styles::SELECT_ROW_BG);
     let row_style = if is_selected { selected_style } else { Style::default() };
-    let indent = "  ".repeat(row_depth(row));
     let width = inner.width as usize;
 
     let marker = if is_selected {
-        Span::styled("▌ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        Span::styled("▌ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD).bg(styles::SELECT_ROW_BG))
     } else {
         Span::raw("  ")
     };
 
     let line = match row {
-        VisibleRow::Dir { collapsed, path, .. } => {
+        VisibleRow::Dir { collapsed, path, added, deleted, guide, .. } => {
             let collapse = if *collapsed { "▸" } else { "▾" };
             Line::from(vec![
                 marker,
                 Span::styled(
-                    pad_right(&truncate(&format!("{}{}📁 {}", collapse, indent, short_name(path)), name_w), name_w),
-                    if is_selected { row_style.fg(Color::Yellow) } else { Style::default().fg(styles::DIR_FG) },
+                    pad_right(&truncate(&format!("{}{} {}", guide, collapse, short_name(path)), name_w), name_w),
+                    row_style.fg(Color::Yellow),
                 ),
                 Span::raw(" "),
-                Span::styled(pad_left("", PLUS_W), Style::default().fg(styles::DIM)),
+                Span::styled(pad_left(&format!("+{}", added), PLUS_W), amount_style(*added, true, is_selected)),
                 Span::raw(" "),
-                Span::styled(pad_left("", MINUS_W), Style::default().fg(styles::DIM)),
+                Span::styled(pad_left(&format!("-{}", deleted), MINUS_W), amount_style(*deleted, false, is_selected)),
                 Span::raw(" "),
-                Span::styled(pad_left("", STATUS_W), Style::default()),
+                Span::styled(pad_left("", STATUS_W), row_style),
             ])
         }
-        VisibleRow::File { file, .. } => {
+        VisibleRow::File { file, guide, .. } => {
             let status_style = if is_selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Black).add_modifier(Modifier::BOLD).bg(styles::status_badge(file.status))
             } else {
-                Style::default().fg(styles::status_fg(file.status))
+                Style::default().fg(Color::Black).bg(styles::status_badge(file.status))
             };
             let status = file.status.letter();
             let name = file.path.rsplit('/').next().unwrap_or(&file.path);
@@ -235,25 +271,38 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
             Line::from(vec![
                 marker,
                 Span::styled(
-                    pad_right(&truncate(&format!("{}{}", indent, name), name_w), name_w),
+                    pad_right(&truncate(&format!("{}{}", guide, name), name_w), name_w),
                     if is_selected { row_style.fg(Color::White) } else { Style::default().fg(Color::White) },
                 ),
                 Span::raw(" "),
-                Span::styled(
-                    pad_left(&plus, PLUS_W),
-                    if is_selected { row_style } else { Style::default().fg(styles::STATUS_OK) },
-                ),
+                Span::styled(pad_left(&plus, PLUS_W), amount_style(file.added, true, is_selected)),
                 Span::raw(" "),
-                Span::styled(
-                    pad_left(&minus, MINUS_W),
-                    if is_selected { row_style } else { Style::default().fg(styles::STATUS_ERR) },
-                ),
+                Span::styled(pad_left(&minus, MINUS_W), amount_style(file.deleted, false, is_selected)),
                 Span::raw(" "),
                 Span::styled(pad_left(status, STATUS_W), status_style),
             ])
         }
     };
     f.render_widget(line, Rect { x: inner.x, y: inner.y + 2 + y, width: width as u16, height: 1 });
+}
+
+/// +N / -N columns: zero is dim, small is plain green/red, larger gets
+/// brighter, and huge counts turn yellow for attention.
+fn amount_style(n: u64, positive: bool, is_selected: bool) -> Style {
+    if is_selected {
+        return Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    }
+    let base = match n {
+        0 => styles::DIM,
+        1..=9 => {
+            if positive { Color::Green } else { Color::Red }
+        }
+        10..=99 => {
+            if positive { Color::Rgb(90, 220, 90) } else { Color::Rgb(255, 90, 90) }
+        }
+        _ => Color::Yellow,
+    };
+    Style::default().fg(base)
 }
 
 // ----------------------------------------------------------------- diff
@@ -577,6 +626,18 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
             left.push(Span::styled(" │ ", styles::status_sep_style()));
             left.push(Span::styled("折叠", Style::default().fg(Color::Yellow)));
         }
+        if ctrl.sort != SortMode::Path {
+            left.push(Span::styled(" │ ", styles::status_sep_style()));
+            let label = match ctrl.sort {
+                SortMode::Path => "路径",
+                SortMode::Status => "按状态",
+                SortMode::Added => "按增行",
+            };
+            left.push(Span::styled(
+                format!("排序: {}", label),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
     } else {
         left.push(Span::styled("select a file", Style::default().fg(styles::DIM)));
     }
@@ -593,7 +654,7 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         right.push(Span::styled("│ [Esc]", styles::key_style()));
         right.push(Span::styled("取消", Style::default().fg(styles::DIM)));
     } else {
-        let hints: [(&str, &str); 11] = [
+        let hints: [(&str, &str); 12] = [
             ("Tab", "焦点"),
             ("Enter", "查看对比"),
             ("↑↓", "移动"),
@@ -601,6 +662,7 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
             ("1/2/3/4", "模式"),
             ("l", "换一个 commit"),
             ("/", "过滤"),
+            ("s", "排序"),
             ("n/m", "hunk"),
             ("z", "折叠"),
             ("?", "帮助"),
@@ -765,7 +827,9 @@ fn render_help(f: &mut Frame, area: Rect) {
                 ("Enter", "查看选中文件对比"),
                 ("→ / ←", "展开 / 折叠目录"),
                 ("PgUp/PgDn", "列表翻页"),
-                ("/", "过滤文件列表"),
+                ("[ / ]", "折叠 / 展开全部目录"),
+                ("s", "切换排序（路径 / 状态 / 增行数）"),
+                ("/", "过滤（! 前缀反向匹配）"),
             ],
         },
         Group {
@@ -843,13 +907,6 @@ fn render_help(f: &mut Frame, area: Rect) {
 }
 
 // ------------------------------------------------------------- helpers
-
-fn row_depth(row: &VisibleRow) -> usize {
-    match row {
-        VisibleRow::Dir { depth, .. } => *depth,
-        VisibleRow::File { depth, .. } => *depth,
-    }
-}
 
 fn short_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -995,7 +1052,9 @@ mod width_check {
                     ("↑↓", "移动光标"),
                     ("→ / ←", "展开 / 折叠目录"),
                     ("PgUp/PgDn", "列表翻页"),
-                    ("/", "过滤文件列表"),
+                    ("[ / ]", "折叠 / 展开全部目录"),
+                    ("s", "切换排序（路径 / 状态 / 增行数）"),
+                    ("/", "过滤（! 前缀反向匹配）"),
                 ],
             },
             Group {

@@ -11,6 +11,9 @@ pub const STATUS_ERR: Color = Color::Red;
 pub const DIM: Color = Color::DarkGray;
 pub const HINT: Color = Color::Gray;
 
+/// Background for the selected file-list row (whole row highlight).
+pub const SELECT_ROW_BG: Color = Color::Rgb(44, 54, 74);
+
 pub const MODIFIED_FG: Color = Color::Yellow;
 pub const ADDED_FG: Color = Color::Green;
 pub const DELETED_FG: Color = Color::Red;
@@ -36,6 +39,17 @@ pub fn status_fg(status: crate::model::Status) -> Color {
         crate::model::Status::Deleted => DELETED_FG,
         crate::model::Status::Renamed => RENAMED_FG,
         crate::model::Status::Untracked => UNTRACKED_FG,
+    }
+}
+
+/// Background color for the status badge (a filled letter block).
+pub fn status_badge(status: crate::model::Status) -> Color {
+    match status {
+        crate::model::Status::Modified => Color::Rgb(110, 84, 22),
+        crate::model::Status::Added => Color::Rgb(26, 92, 46),
+        crate::model::Status::Deleted => Color::Rgb(120, 36, 36),
+        crate::model::Status::Renamed => Color::Rgb(22, 78, 92),
+        crate::model::Status::Untracked => Color::Rgb(26, 92, 46),
     }
 }
 

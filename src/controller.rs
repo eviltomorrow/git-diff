@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::align::{align_rows, hunk_index, hunk_starts, plain_rows, AlignedRow, LineKind};
 use crate::git::GitFacade;
 use crate::model::{ChangedFile, CommitEntry, ComparisonMode};
-use crate::tree::{self, TreeNode, VisibleRow};
+use crate::tree::{self, SortMode, TreeNode, VisibleRow};
 
 pub const LINE_LIMIT: usize = 50_000;
 pub const FOLD_MIN: usize = 10;
@@ -97,6 +97,8 @@ pub struct Controller<'a> {
     pub hunk_idx: usize,
     pub hunk_count: usize,
     pub filter: Option<String>,
+    /// Sibling ordering for the file list.
+    pub sort: SortMode,
     pub overlay: Option<Overlay>,
     pub focus: Focus,
     pub diff_viewport: usize,
@@ -139,6 +141,7 @@ impl<'a> Controller<'a> {
             hunk_idx: 0,
             hunk_count: 0,
             filter: None,
+            sort: SortMode::Path,
             overlay: None,
             focus: Focus::FileList,
             diff_viewport: 0,
@@ -185,7 +188,7 @@ impl<'a> Controller<'a> {
         match result {
             Ok(files) => {
                 self.files = files;
-                self.tree_cache = tree::build_tree(&self.files);
+                self.tree_cache = tree::build_tree(&self.files, self.sort);
                 if keep_state {
                     self.restore_cursor(prev.as_deref());
                 } else {
@@ -242,22 +245,22 @@ impl<'a> Controller<'a> {
         } else {
             &self.collapsed
         };
-        let all = tree::visible_rows(&self.tree_cache, collapsed);
-        if let Some(f) = filter {
-            if f.is_empty() {
-                all
-            } else {
-                // substring match on path; a dir row matches if any of its files match
-                let f = f.to_lowercase();
-                all.into_iter()
-                    .filter(|r| match r {
-                        VisibleRow::File { file, .. } => file.path.to_lowercase().contains(&f),
-                        VisibleRow::Dir { path, .. } => path.to_lowercase().contains(&f),
-                    })
-                    .collect()
+        match filter.filter(|f| !f.trim().is_empty()) {
+            None => tree::visible_rows(&self.tree_cache, collapsed),
+            Some(f) => {
+                // optional leading `!` inverts the match; otherwise a
+                // case-insensitive substring match on the file path. Directories
+                // are kept only when a descendant matches (empty dirs hide).
+                let (negate, pat) = match f.strip_prefix('!') {
+                    Some(rest) => (true, rest),
+                    None => (false, f),
+                };
+                let pat = pat.to_lowercase();
+                tree::filtered_rows(&self.tree_cache, &|file: &ChangedFile| {
+                    let m = file.path.to_lowercase().contains(&pat);
+                    if negate { !m } else { m }
+                })
             }
-        } else {
-            all
         }
     }
 
@@ -349,6 +352,9 @@ impl<'a> Controller<'a> {
             (KeyCode::Char('z'), KeyModifiers::NONE) => {
                 self.fold_unchanged = !self.fold_unchanged;
             }
+            (KeyCode::Char('s'), KeyModifiers::NONE) => self.cycle_sort(),
+            (KeyCode::Char('['), KeyModifiers::NONE) => self.collapse_all_dirs(),
+            (KeyCode::Char(']'), KeyModifiers::NONE) => self.expand_all_dirs(),
             (KeyCode::Right, KeyModifiers::CONTROL) => self.scroll_horizontal(1),
             (KeyCode::Left, KeyModifiers::CONTROL) => self.scroll_horizontal(-1),
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => self.move_diff_cursor(-1),
@@ -529,6 +535,32 @@ impl<'a> Controller<'a> {
             Focus::FileList => Focus::Diff,
             Focus::Diff => Focus::FileList,
         };
+    }
+
+    fn cycle_sort(&mut self) {
+        self.sort = match self.sort {
+            SortMode::Path => SortMode::Status,
+            SortMode::Status => SortMode::Added,
+            SortMode::Added => SortMode::Path,
+        };
+        self.tree_cache = tree::build_tree(&self.files, self.sort);
+        self.status = match self.sort {
+            SortMode::Path => "排序: 路径".into(),
+            SortMode::Status => "排序: 状态".into(),
+            SortMode::Added => "排序: 增行数".into(),
+        };
+    }
+
+    fn collapse_all_dirs(&mut self) {
+        for path in tree::all_dir_paths(&self.tree_cache) {
+            self.collapsed.insert(path);
+        }
+        self.load_diff();
+    }
+
+    fn expand_all_dirs(&mut self) {
+        self.collapsed.clear();
+        self.load_diff();
     }
 
     fn list_page(&self) -> usize {

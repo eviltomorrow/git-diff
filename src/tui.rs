@@ -992,57 +992,57 @@ impl<'a> App<'a> {
     }
 
     fn render_statusbar(&mut self, f: &mut Frame, area: Rect) {
-        let mut spans: Vec<Span> = Vec::new();
+        let mut left: Vec<Span> = Vec::new();
         let mode_tag = match self.mode {
             ComparisonMode::WorkingVsHead => "[模式A]",
             ComparisonMode::StagedVsHead => "[模式B]",
             ComparisonMode::StagedVsWorking => "[模式C]",
             ComparisonMode::CommitVsHead => "[模式D]",
         };
-        spans.push(Span::styled(mode_tag, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-        spans.push(Span::raw(" "));
+        left.push(Span::styled(mode_tag, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        left.push(Span::raw(" "));
         if self.loading {
-            spans.push(Span::styled("loading...", Style::default().fg(Color::Yellow)));
+            left.push(Span::styled("loading...", Style::default().fg(Color::Yellow)));
         } else if !self.status.is_empty() {
-            spans.push(Span::styled(&self.status, Style::default().fg(Color::Red)));
+            left.push(Span::styled(&self.status, Style::default().fg(Color::Red)));
         } else if let Some(f) = &self.diff_file {
-            spans.push(Span::styled(
+            left.push(Span::styled(
                 format!("{}  ", f.path),
                 Style::default().fg(Color::White),
             ));
-            spans.push(Span::styled(
+            left.push(Span::styled(
                 format!("+{} -{}", f.added, f.deleted),
                 Style::default().fg(Color::DarkGray),
             ));
             if self.hunk_count > 0 {
-                spans.push(Span::styled(" │ ", styles::status_sep_style()));
-                spans.push(Span::styled(
+                left.push(Span::styled(" │ ", styles::status_sep_style()));
+                left.push(Span::styled(
                     format!("hunk {}/{}", self.hunk_idx, self.hunk_count),
                     Style::default().fg(Color::Cyan),
                 ));
             }
             if !self.diff_rows.is_empty() {
-                spans.push(Span::styled(" │ ", styles::status_sep_style()));
-                spans.push(Span::styled(
+                left.push(Span::styled(" │ ", styles::status_sep_style()));
+                left.push(Span::styled(
                     format!("行 {}/{}", self.diff_cursor + 1, self.diff_rows.len()),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
             if self.fold_unchanged {
-                spans.push(Span::styled(" │ ", styles::status_sep_style()));
-                spans.push(Span::styled("折叠", Style::default().fg(Color::Yellow)));
+                left.push(Span::styled(" │ ", styles::status_sep_style()));
+                left.push(Span::styled("折叠", Style::default().fg(Color::Yellow)));
             }
         } else {
-            spans.push(Span::styled("select a file", Style::default().fg(styles::DIM)));
+            left.push(Span::styled("select a file", Style::default().fg(styles::DIM)));
         }
 
         // right-aligned hint block
-        spans.push(Span::styled(" │ ", styles::status_sep_style()));
+        let mut right: Vec<Span> = Vec::new();
         if let Some(f) = &self.filter {
             let f = f.clone();
-            spans.push(Span::styled("filter:", styles::key_style()));
-            spans.push(Span::styled(format!("{} ", f), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled("Esc取消", Style::default().fg(styles::DIM)));
+            right.push(Span::styled("filter:", styles::key_style()));
+            right.push(Span::styled(format!("{} ", f), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+            right.push(Span::styled("Esc取消", Style::default().fg(styles::DIM)));
         } else {
             let hints: [(&str, &str); 10] = [
                 ("Tab", "焦点"),
@@ -1057,10 +1057,21 @@ impl<'a> App<'a> {
                 ("q", "退出"),
             ];
             for (k, d) in hints.iter() {
-                spans.push(Span::styled(format!("[{}]", k), styles::key_style()));
-                spans.push(Span::styled(format!("{} ", d), Style::default().fg(styles::DIM)));
+                right.push(Span::styled(format!("[{}]", k), styles::key_style()));
+                right.push(Span::styled(format!("{} ", d), Style::default().fg(styles::DIM)));
             }
         }
+
+        let mut spans = left;
+        let left_w: usize = spans.iter().map(|s| s.width()).sum();
+        let right_w: usize = right.iter().map(|s| s.width()).sum();
+        let w = area.width as usize;
+        if left_w + right_w + 2 < w {
+            spans.push(Span::raw(" ".repeat(w - left_w - right_w - 2)));
+        } else if !right.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(right);
         f.render_widget(Line::from(spans), area);
     }
 

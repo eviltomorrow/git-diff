@@ -251,6 +251,32 @@ impl<'a> App<'a> {
                     self.cursor = 0;
                     return;
                 }
+                (KeyCode::Enter, _) => {
+                    // confirm the filter result: exit filter mode and focus the
+                    // diff panel to view the matched file
+                    let filtered = self.visible_rows();
+                    let target = filtered
+                        .iter()
+                        .find_map(|r| match r {
+                            VisibleRow::File { file, .. } => Some(file.path.clone()),
+                            _ => None,
+                        });
+                    self.filter = None;
+                    if let Some(path) = target {
+                        let rows = self.visible_rows();
+                        if let Some(fi) = rows.iter().position(|r| match r {
+                            VisibleRow::File { file, .. } => file.path == path,
+                            _ => false,
+                        }) {
+                            self.cursor = fi;
+                        }
+                    }
+                    self.load_diff();
+                    if self.diff_file.is_some() {
+                        self.focus = Focus::Diff;
+                    }
+                    return;
+                }
                 _ => {}
             }
         }

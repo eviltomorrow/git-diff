@@ -30,8 +30,9 @@ fn has_commits(root: &PathBuf) -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
+    let arg = std::env::args().nth(1);
     let root = repo_root()?;
     let commits = has_commits(&root);
     let runner = SystemRunner::new(root.clone());
-    tui::run(&runner, root, commits)
+    tui::run(&runner, root, commits, arg)
 }

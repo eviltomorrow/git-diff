@@ -84,13 +84,22 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    pub fn new(facade: GitFacade<'a>, repo_path: PathBuf, has_commits: bool) -> Result<Self> {
+    pub fn new(
+        facade: GitFacade<'a>,
+        repo_path: PathBuf,
+        has_commits: bool,
+        initial_commit: Option<String>,
+    ) -> Result<Self> {
         let mut app = Self {
             facade,
             repo_path,
             has_commits,
-            mode: ComparisonMode::WorkingVsHead,
-            selected_commit: None,
+            mode: if initial_commit.is_some() {
+                ComparisonMode::CommitVsHead
+            } else {
+                ComparisonMode::WorkingVsHead
+            },
+            selected_commit: initial_commit.clone(),
             mode_state: std::array::from_fn(|_| ModeState::default()),
             files: Vec::new(),
             collapsed: HashSet::new(),
@@ -114,6 +123,9 @@ impl<'a> App<'a> {
             loading: false,
             status: String::new(),
         };
+        if let Some(c) = &app.selected_commit {
+            app.mode_state[app.mode_index(ComparisonMode::CommitVsHead)].selected_commit = Some(c.clone());
+        }
         app.reload(false)?;
         Ok(app)
     }
@@ -1505,9 +1517,14 @@ fn pad_left(s: &str, width: usize) -> String {
     }
 }
 
-pub fn run<R: GitRunner>(runner: &R, root: PathBuf, has_commits: bool) -> Result<()> {
+pub fn run<R: GitRunner>(
+    runner: &R,
+    root: PathBuf,
+    has_commits: bool,
+    initial_commit: Option<String>,
+) -> Result<()> {
     let facade = GitFacade::new(runner, &root);
-    let mut app = App::new(facade, root, has_commits)?;
+    let mut app = App::new(facade, root, has_commits, initial_commit)?;
 
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;

@@ -42,8 +42,8 @@ const FOLD_MIN: usize = 10;
 /// Per-comparison-mode navigation state, restored when switching back.
 #[derive(Default)]
 struct ModeState {
-    /// Path of the selected file (indexes are meaningless across modes since
-    /// the file sets differ).
+    /// Path of the selected visible row (file or directory). Indexes are
+    /// meaningless across modes since the file sets differ.
     selected_path: Option<String>,
     list_scroll: usize,
     collapsed: HashSet<String>,
@@ -409,7 +409,7 @@ impl<'a> App<'a> {
             let rows = self.visible_rows();
             if let Some(ri) = rows.iter().position(|r| match r {
                 VisibleRow::File { file, .. } => file.path == path,
-                _ => false,
+                VisibleRow::Dir { path: p, .. } => *p == path,
             }) {
                 self.cursor = ri;
                 self.list_scroll = self.mode_state[idx].list_scroll;
@@ -435,9 +435,9 @@ impl<'a> App<'a> {
 
     fn save_mode_state(&mut self) {
         let idx = self.mode_index(self.mode);
-        let selected_path = self.visible_rows().get(self.cursor).and_then(|r| match r {
-            VisibleRow::File { file, .. } => Some(file.path.clone()),
-            _ => None,
+        let selected_path = self.visible_rows().get(self.cursor).map(|r| match r {
+            VisibleRow::File { file, .. } => file.path.clone(),
+            VisibleRow::Dir { path, .. } => path.clone(),
         });
         self.mode_state[idx] = ModeState {
             selected_path,

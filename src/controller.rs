@@ -375,6 +375,8 @@ impl<'a> Controller<'a> {
                     return;
                 }
                 (KeyCode::Enter, _) => {
+                    // confirm the search: jump to the match and leave search mode
+                    self.jump_to_search_match();
                     self.search = None;
                     self.focus = Focus::Diff;
                     return;

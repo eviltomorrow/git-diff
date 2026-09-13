@@ -225,8 +225,28 @@ fn search_jumps_to_matching_row() {
         .map(|c| c.text.as_str())
         .unwrap_or("");
     assert!(hit.contains('y'));
-    ctrl.handle_key(key(KeyCode::Esc));
+    // Enter confirms: cursor stays on the match and search mode exits
+    ctrl.handle_key(key(KeyCode::Enter));
     assert!(ctrl.search.is_none());
+    assert_eq!(ctrl.focus, Focus::Diff);
+    let after = ctrl.diff_rows[ctrl.diff_cursor]
+        .original
+        .as_ref()
+        .map(|c| c.text.as_str())
+        .unwrap_or("");
+    assert!(after.contains('y'));
+}
+
+#[test]
+fn search_enter_without_match_keeps_cursor() {
+    let mut ctrl = setup();
+    ctrl.handle_key(key(KeyCode::Down)); // to lib.rs
+    let before = ctrl.diff_cursor;
+    ctrl.handle_key(key(KeyCode::Char('f')));
+    ctrl.handle_key(key(KeyCode::Char('z'))); // no match in lib.rs
+    ctrl.handle_key(key(KeyCode::Enter));
+    assert!(ctrl.search.is_none());
+    assert_eq!(ctrl.diff_cursor, before);
 }
 
 #[test]

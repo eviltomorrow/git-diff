@@ -215,6 +215,8 @@ impl<'a> GitFacade<'a> {
     pub fn commits(&self) -> anyhow::Result<Vec<CommitEntry>> {
         let out = self.run(&[
             "log",
+            "-n",
+            "200",
             "--pretty=format:%h|%s|%ad|%an",
             "--date=short",
         ])?;

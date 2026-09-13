@@ -859,16 +859,21 @@ impl<'a> App<'a> {
             LineKind::Equal => " ",
         };
         let (fg, bg, emph_bg) = match kind {
-            LineKind::Delete => (Color::Red, styles::DEL_BG, styles::INLINE_DEL_BG),
-            LineKind::Insert => (Color::Green, styles::ADD_BG, styles::INLINE_ADD_BG),
+            LineKind::Delete => (Color::White, styles::DEL_BG, styles::INLINE_DEL_BG),
+            LineKind::Insert => (Color::White, styles::ADD_BG, styles::INLINE_ADD_BG),
             LineKind::Equal => (Color::White, Color::Reset, Color::Reset),
         };
         let is_cursor = self.focus == Focus::Diff && real == self.diff_cursor;
         let mut spans = self.content_spans(cell, is_original, fg, bg, emph_bg, content_w);
         let line_num = format!("{:>3} ", cell.num);
+        let marker_color = match kind {
+            LineKind::Delete => Color::Red,
+            LineKind::Insert => Color::Green,
+            LineKind::Equal => Color::DarkGray,
+        };
         if is_cursor {
             spans.insert(0, Span::styled(line_num, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-            spans.insert(1, Span::styled(marker, Style::default().fg(fg).add_modifier(Modifier::BOLD).bg(styles::CURSOR_BG)));
+            spans.insert(1, Span::styled(marker, Style::default().fg(marker_color).add_modifier(Modifier::BOLD).bg(styles::CURSOR_BG)));
             // give every content span the cursor background
             for s in spans.iter_mut().skip(2) {
                 let st = s.style;
@@ -877,7 +882,7 @@ impl<'a> App<'a> {
             }
         } else {
             spans.insert(0, Span::styled(line_num, Style::default().fg(styles::DIM)));
-            spans.insert(1, Span::styled(marker, Style::default().fg(fg).add_modifier(Modifier::BOLD)));
+            spans.insert(1, Span::styled(marker, Style::default().fg(marker_color).add_modifier(Modifier::BOLD)));
         }
         let line = Line::from(spans);
         let y = inner.y + 1 + screen as u16;
@@ -913,7 +918,9 @@ impl<'a> App<'a> {
             let seg_w = UnicodeWidthStr::width(seg);
             let remaining = avail.saturating_sub(used);
             let style = if emph {
-                Style::default().fg(fg).add_modifier(Modifier::BOLD).bg(emph_bg)
+                Style::default().fg(fg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    .bg(emph_bg)
             } else {
                 Style::default().fg(fg).bg(bg)
             };

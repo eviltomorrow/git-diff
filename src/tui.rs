@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -39,12 +39,27 @@ enum Focus {
 
 const FOLD_MIN: usize = 10;
 
+/// Per-comparison-mode navigation state, restored when switching back.
+#[derive(Default)]
+struct ModeState {
+    /// Path of the selected file (indexes are meaningless across modes since
+    /// the file sets differ).
+    selected_path: Option<String>,
+    list_scroll: usize,
+    collapsed: HashSet<String>,
+    selected_commit: Option<String>,
+    diff_vscroll: usize,
+    diff_hscroll: usize,
+    diff_cursor: usize,
+}
+
 pub struct App<'a> {
     facade: GitFacade<'a>,
     repo_path: PathBuf,
     has_commits: bool,
     mode: ComparisonMode,
     selected_commit: Option<String>,
+    mode_state: [ModeState; 4],
     files: Vec<ChangedFile>,
     collapsed: HashSet<String>,
     cursor: usize,
@@ -76,6 +91,7 @@ impl<'a> App<'a> {
             has_commits,
             mode: ComparisonMode::WorkingVsHead,
             selected_commit: None,
+            mode_state: std::array::from_fn(|_| ModeState::default()),
             files: Vec::new(),
             collapsed: HashSet::new(),
             cursor: 0,
@@ -335,6 +351,8 @@ impl<'a> App<'a> {
             None => None,
         };
         if let Some(selected) = action.flatten() {
+            // save the mode we're leaving so switching back restores it
+            self.save_mode_state();
             self.selected_commit = Some(selected.short_hash.clone());
             self.mode = ComparisonMode::CommitVsHead;
             self.overlay = None;
@@ -349,10 +367,61 @@ impl<'a> App<'a> {
         if self.mode == mode {
             return;
         }
+        // save the current mode's navigation state
+        self.save_mode_state();
         self.mode = mode;
-        self.selected_commit = None;
+        self.selected_commit = self.mode_state[self.mode_index(mode)].selected_commit.clone();
         self.filter = None;
+        // reload to load the target mode's file set
+        let idx = self.mode_index(mode);
         let _ = self.reload(false);
+        // restore the target mode's saved navigation by path (file sets differ
+        // between modes, so indexes are meaningless)
+        self.collapsed = self.mode_state[idx].collapsed.clone();
+        let saved_path = self.mode_state[idx].selected_path.clone();
+        if let Some(path) = saved_path {
+            let rows = self.visible_rows();
+            if let Some(ri) = rows.iter().position(|r| match r {
+                VisibleRow::File { file, .. } => file.path == path,
+                _ => false,
+            }) {
+                self.cursor = ri;
+                self.list_scroll = self.mode_state[idx].list_scroll;
+            }
+        }
+        self.load_diff();
+        // restore the target mode's saved diff scroll after load_diff reset it
+        self.diff_vscroll = self.mode_state[idx].diff_vscroll;
+        self.diff_hscroll = self.mode_state[idx].diff_hscroll;
+        self.diff_cursor = self.mode_state[idx].diff_cursor;
+        self.keep_cursor_visible();
+        self.sync_hunk_idx();
+    }
+
+    fn mode_index(&self, mode: ComparisonMode) -> usize {
+        match mode {
+            ComparisonMode::WorkingVsHead => 0,
+            ComparisonMode::StagedVsHead => 1,
+            ComparisonMode::StagedVsWorking => 2,
+            ComparisonMode::CommitVsHead => 3,
+        }
+    }
+
+    fn save_mode_state(&mut self) {
+        let idx = self.mode_index(self.mode);
+        let selected_path = self.visible_rows().get(self.cursor).and_then(|r| match r {
+            VisibleRow::File { file, .. } => Some(file.path.clone()),
+            _ => None,
+        });
+        self.mode_state[idx] = ModeState {
+            selected_path,
+            list_scroll: self.list_scroll,
+            collapsed: self.collapsed.clone(),
+            selected_commit: self.selected_commit.clone(),
+            diff_vscroll: self.diff_vscroll,
+            diff_hscroll: self.diff_hscroll,
+            diff_cursor: self.diff_cursor,
+        };
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -1396,8 +1465,7 @@ pub fn run<R: GitRunner>(runner: &R, root: PathBuf, has_commits: bool) -> Result
     let mut app = App::new(facade, root, has_commits)?;
 
     enable_raw_mode()?;
-    // draw on the main screen buffer (no alternate screen) so the last frame
-    // stays visible after quitting
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
     let stdout = std::io::stdout();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -1405,9 +1473,10 @@ pub fn run<R: GitRunner>(runner: &R, root: PathBuf, has_commits: bool) -> Result
 
     let result = event_loop(&mut terminal, &mut app);
 
-    // restore terminal but keep the screen content: leave raw mode, show cursor
+    // restore terminal to its original state: leave raw mode and the alternate
+    // screen so the shell prompt renders normally after quitting
     disable_raw_mode()?;
-    let _ = execute!(std::io::stdout(), crossterm::cursor::Show);
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
     result
 }
 

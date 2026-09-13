@@ -519,7 +519,7 @@ impl<'a> App<'a> {
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(2),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(area);
         self.render_header(f, chunks[0]);
@@ -529,7 +529,12 @@ impl<'a> App<'a> {
             .split(chunks[1]);
         self.render_filelist(f, panels[0]);
         self.render_diffview(f, panels[1]);
-        self.render_statusbar(f, chunks[2]);
+        let status_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(chunks[2]);
+        self.render_statusbar(f, status_rows[0]);
+        self.render_hints(f, status_rows[1]);
         if self.overlay.is_some() {
             let (commits, cursor) = match &self.overlay {
                 Some(Overlay::CommitPicker { commits, cursor }) => (commits.clone(), *cursor),
@@ -1028,35 +1033,39 @@ impl<'a> App<'a> {
                     Style::default().fg(Color::DarkGray),
                 ));
             }
+            if self.fold_unchanged {
+                spans.push(Span::styled(" │ ", styles::status_sep_style()));
+                spans.push(Span::styled("折叠:开", Style::default().fg(Color::Yellow)));
+            }
         } else {
             spans.push(Span::styled("select a file", Style::default().fg(styles::DIM)));
         }
+        f.render_widget(Line::from(spans), area);
+    }
 
-        let mut hint: Vec<Span> = vec![
-            key_hint("Tab"),
-            key_hint("↑↓"),
-            key_hint("PgUp/PgDn"),
-            key_hint("l"),
-            key_hint("1/2/3"),
-            key_hint("/"),
-            key_hint("n/N"),
-            key_hint("z"),
-            key_hint("r"),
-            key_hint("?"),
-            key_hint("q"),
+    fn render_hints(&mut self, f: &mut Frame, area: Rect) {
+        let hints: [(&str, &str); 11] = [
+            ("Tab", "切换焦点"),
+            ("↑↓", "移动/滚动"),
+            ("PgUp/PgDn", "翻页"),
+            ("l", "commit"),
+            ("1/2/3", "模式"),
+            ("/", "过滤"),
+            ("n/N", "hunk"),
+            ("z", "折叠"),
+            ("r", "刷新"),
+            ("?", "帮助"),
+            ("q", "退出"),
         ];
+        let mut spans: Vec<Span> = Vec::new();
+        for (k, d) in hints.iter() {
+            spans.push(Span::styled(format!("[{}]", k), styles::key_style()));
+            spans.push(Span::styled(format!("{}  ", d), Style::default().fg(styles::DIM)));
+        }
         if let Some(f) = &self.filter {
             let f = f.clone();
-            hint.push(Span::styled(format!(" filter: {}", f), Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(format!(" filter: {}", f), Style::default().fg(Color::Cyan)));
         }
-        spans.push(Span::styled(" │ ", styles::status_sep_style()));
-        let w = area.width as usize;
-        let left_width: usize = spans.iter().map(|s| s.width()).sum();
-        let right_width: usize = hint.iter().map(|s| s.width()).sum();
-        if left_width + right_width + 2 < w {
-            spans.push(Span::raw(" ".repeat(w - left_width - right_width - 2)));
-        }
-        spans.extend(hint);
         f.render_widget(Line::from(spans), area);
     }
 
@@ -1347,11 +1356,6 @@ fn pad_left(s: &str, width: usize) -> String {
     } else {
         format!("{}{}", " ".repeat(width - w), s)
     }
-}
-
-fn key_hint<'a>(key: &'a str) -> Span<'a> {
-    Span::styled(format!("[{}]", key), styles::key_style())
-        .to_owned()
 }
 
 pub fn run<R: GitRunner>(runner: &R, root: PathBuf, has_commits: bool) -> Result<()> {

@@ -1049,7 +1049,8 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
             .max()
             .unwrap_or(0);
         let total_rows: usize = groups.iter().map(|g| g.rows.len() + 1).sum::<usize>() + (groups.len() - 1);
-        let width = ((key_w + desc_w + INNER_PAD as usize * 2) as u16)
+        let row_w = 2 + key_w + desc_w;
+        let width = ((row_w + INNER_PAD as usize * 2 + 4) as u16)
             .min(area.width.saturating_sub(4))
             .max(34);
         let height = (total_rows as u16 + 4).min(area.height.saturating_sub(2));
@@ -1086,10 +1087,8 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
                     Span::styled(pad_right(k, key_w), styles::key_style()),
                     Span::styled(*d, Style::default().fg(Color::White)),
                 ]);
-                f.render_widget(
-                    line,
-                    Rect { x: inner.x + 1, y: inner.y + 1 + row_idx as u16, width: inner.width.saturating_sub(2), height: 1 },
-                );
+                let rect = Rect { x: inner.x + 1, y: inner.y + 1 + row_idx as u16, width: inner.width.saturating_sub(2), height: 1 };
+                f.render_widget(line, rect);
                 row_idx += 1;
             }
             // blank separator line between groups
@@ -1204,4 +1203,70 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App<'_>) -> Res
         }
     }
     Ok(())
+}
+#[cfg(test)]
+mod width_check {
+    use unicode_width::UnicodeWidthStr;
+
+    struct Group<'a> {
+        rows: &'a [(&'a str, &'a str)],
+    }
+
+    fn panel_width(groups: &[Group]) -> (usize, usize, usize) {
+        const KEY_GAP: usize = 6;
+        const INNER_PAD: usize = 2;
+        let key_w = groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .map(|(k, _)| UnicodeWidthStr::width(*k))
+            .max()
+            .unwrap_or(0)
+            + KEY_GAP;
+        let desc_w = groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .map(|(_, d)| UnicodeWidthStr::width(*d))
+            .max()
+            .unwrap_or(0);
+        let row_w = 2 + key_w + desc_w;
+        let width = row_w + INNER_PAD * 2 + 2;
+        (row_w, width, width - 4)
+    }
+
+    #[test]
+    fn help_rows_fit_within_panel() {
+        let groups = [
+            Group {
+                
+                rows: &[
+                    ("Tab", "切换焦点（文件列表 / 对比区）"),
+                    ("l", "打开 commit 选择器 (模式D)"),
+                    ("1 / 2 / 3", "切换比较模式 A/B/C"),
+                    ("r", "刷新"),
+                    ("?", "本帮助"),
+                    ("q / Ctrl+C", "退出"),
+                ],
+            },
+            Group {
+                
+                rows: &[
+                    ("↑↓", "移动光标"),
+                    ("→ / ←", "展开 / 折叠目录"),
+                    ("PgUp/PgDn", "列表翻页"),
+                    ("/", "过滤文件列表"),
+                ],
+            },
+            Group {
+                
+                rows: &[
+                    ("↑↓", "逐行滚动"),
+                    ("PgUp/PgDn", "按页滚动"),
+                    ("→ / ←", "水平滚动"),
+                    ("n / N", "跳转 hunk"),
+                ],
+            },
+        ];
+        let (row_w, _width, inner_avail) = panel_width(&groups);
+        assert!(row_w <= inner_avail, "rows {} exceed inner {} ", row_w, inner_avail);
+    }
 }

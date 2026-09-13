@@ -284,33 +284,11 @@ impl<'a> App<'a> {
             (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 // handled by caller to exit
             }
-            (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                // re-enter the last selected commit comparison if we already
-                // have one; otherwise open the commit picker
-                let idx = self.mode_index(ComparisonMode::CommitVsHead);
-                if self.mode != ComparisonMode::CommitVsHead
-                    && self.mode_state[idx].selected_commit.is_some()
-                {
-                    self.save_mode_state();
-                    self.mode = ComparisonMode::CommitVsHead;
-                    self.selected_commit = self.mode_state[idx].selected_commit.clone();
-                    self.filter = None;
-                    let _ = self.reload(false);
-                    self.restore_mode_nav(idx);
-                } else if self.has_commits {
-                    match self.facade.commits() {
-                        Ok(commits) => {
-                            self.overlay = Some(Overlay::CommitPicker { commits, cursor: 0 });
-                        }
-                        Err(e) => self.status = format!("加载 commit 失败: {}", e),
-                    }
-                } else {
-                    self.status = "仓库还没有 commit".into();
-                }
-            }
+            (KeyCode::Char('l'), KeyModifiers::NONE) => self.enter_mode_d(),
             (KeyCode::Char('1'), KeyModifiers::NONE) => self.set_mode(ComparisonMode::WorkingVsHead),
             (KeyCode::Char('2'), KeyModifiers::NONE) => self.set_mode(ComparisonMode::StagedVsHead),
             (KeyCode::Char('3'), KeyModifiers::NONE) => self.set_mode(ComparisonMode::StagedVsWorking),
+            (KeyCode::Char('4'), KeyModifiers::NONE) => self.enter_mode_d(),
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 let _ = self.reload(true);
             }
@@ -404,11 +382,34 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Enter mode D (HEAD ↔ selected commit). Re-uses the last selected commit
+    /// if one exists; otherwise opens the commit picker.
+    fn enter_mode_d(&mut self) {
+        let idx = self.mode_index(ComparisonMode::CommitVsHead);
+        let has_saved = self.mode_state[idx].selected_commit.is_some();
+        if self.mode != ComparisonMode::CommitVsHead && has_saved {
+            self.save_mode_state();
+            self.mode = ComparisonMode::CommitVsHead;
+            self.selected_commit = self.mode_state[idx].selected_commit.clone();
+            self.filter = None;
+            let _ = self.reload(false);
+            self.restore_mode_nav(idx);
+        } else if self.has_commits {
+            match self.facade.commits() {
+                Ok(commits) => {
+                    self.overlay = Some(Overlay::CommitPicker { commits, cursor: 0 });
+                }
+                Err(e) => self.status = format!("加载 commit 失败: {}", e),
+            }
+        } else {
+            self.status = "仓库还没有 commit".into();
+        }
+    }
+
     fn set_mode(&mut self, mode: ComparisonMode) {
         if self.mode == mode {
             return;
         }
-        // save the current mode's navigation state
         self.save_mode_state();
         self.mode = mode;
         self.selected_commit = self.mode_state[self.mode_index(mode)].selected_commit.clone();
@@ -1187,8 +1188,8 @@ impl<'a> App<'a> {
                 ("Enter", "查看对比"),
                 ("↑↓", "移动"),
                 ("Pg", "翻页"),
-                ("l", "commit"),
-                ("1/2/3", "模式"),
+                ("1/2/3/4", "模式"),
+                ("l", "换一个 commit"),
                 ("/", "过滤"),
                 ("n/m", "hunk"),
                 ("z", "折叠"),
@@ -1338,8 +1339,8 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
                 title: "通用",
                 rows: &[
                     ("Tab", "切换焦点（文件列表 / 对比区）"),
-                    ("l", "打开 commit 选择器 (模式D)"),
-                    ("1 / 2 / 3", "切换比较模式 A/B/C"),
+                    ("4", "进入模式D（上次 commit 对比 / 选择 commit）"),
+                    ("1 / 2 / 3 / 4", "切换比较模式 A/B/C/D"),
                     ("r", "刷新"),
                     ("?", "本帮助"),
                     ("q / Ctrl+C", "退出"),
@@ -1576,8 +1577,8 @@ mod width_check {
                 
                 rows: &[
                     ("Tab", "切换焦点（文件列表 / 对比区）"),
-                    ("l", "打开 commit 选择器 (模式D)"),
-                    ("1 / 2 / 3", "切换比较模式 A/B/C"),
+                    ("4", "进入模式D（上次 commit 对比 / 选择 commit）"),
+                    ("1 / 2 / 3 / 4", "切换比较模式 A/B/C/D"),
                     ("r", "刷新"),
                     ("?", "本帮助"),
                     ("q / Ctrl+C", "退出"),

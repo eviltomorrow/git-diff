@@ -266,7 +266,7 @@ impl<'a> App<'a> {
             }
             (KeyCode::Tab, _) => self.toggle_focus(),
             (KeyCode::Char('n'), KeyModifiers::NONE) => self.jump_hunk(1),
-            (KeyCode::Char('N'), KeyModifiers::NONE) => self.jump_hunk(-1),
+            (KeyCode::Char('N'), _) => self.jump_hunk(-1),
             (KeyCode::Char('z'), KeyModifiers::NONE) => {
                 self.fold_unchanged = !self.fold_unchanged;
             }

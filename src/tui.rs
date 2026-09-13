@@ -10,13 +10,18 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::align::{align_rows, hunk_starts, AlignedRow, LineKind};
+use crate::align::{align_rows, hunk_starts, plain_rows, AlignedRow, LineKind};
 use crate::git::{GitFacade, GitRunner};
-use crate::model::{ChangedFile, CommitEntry, ComparisonMode};
+use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
 use crate::tree::{self, VisibleRow};
 
 const LIST_RATIO: u16 = 30;
+const LINE_LIMIT: usize = 50_000;
+
+fn line_count(content: &[u8]) -> usize {
+    content.iter().filter(|&&b| b == b'\n').count() + 1
+}
 
 enum Overlay {
     CommitPicker { commits: Vec<CommitEntry>, cursor: usize },
@@ -66,11 +71,11 @@ impl<'a> App<'a> {
             loading: false,
             status: String::new(),
         };
-        app.reload()?;
+        app.reload(false)?;
         Ok(app)
     }
 
-    pub fn reload(&mut self) -> Result<()> {
+    pub fn reload(&mut self, keep_state: bool) -> Result<()> {
         self.loading = true;
         self.status = "loading...".into();
         let prev = self
@@ -85,23 +90,22 @@ impl<'a> App<'a> {
                     Ok(Vec::new())
                 }
             }
+            ComparisonMode::WorkingVsHead if !self.has_commits => {
+                self.facade.untracked_files()
+            }
             _ => self.facade.changed_files(self.mode),
         };
         self.loading = false;
         match result {
             Ok(files) => {
                 self.files = files;
-                if let Some(prev) = prev {
-                    self.cursor = self
-                        .files
-                        .iter()
-                        .position(|f| f.path == prev)
-                        .unwrap_or(0);
+                if keep_state {
+                    self.restore_cursor(prev.as_deref());
                 } else {
                     self.cursor = 0;
+                    self.list_scroll = 0;
+                    self.collapsed.clear();
                 }
-                self.list_scroll = 0;
-                self.collapsed.clear();
                 self.status.clear();
                 self.load_diff();
                 Ok(())
@@ -109,6 +113,28 @@ impl<'a> App<'a> {
             Err(e) => {
                 self.status = format!("刷新失败: {}", e);
                 Ok(())
+            }
+        }
+    }
+
+    fn restore_cursor(&mut self, prev: Option<&str>) {
+        let Some(prev) = prev else {
+            self.cursor = 0;
+            self.list_scroll = 0;
+            return;
+        };
+        let rows = self.visible_rows();
+        match rows.iter().position(|r| match r {
+            VisibleRow::File { file, .. } => file.path == prev,
+            _ => false,
+        }) {
+            Some(idx) => {
+                self.cursor = idx;
+                self.list_scroll = idx.saturating_sub(10);
+            }
+            None => {
+                self.cursor = 0;
+                self.list_scroll = 0;
             }
         }
     }
@@ -137,8 +163,8 @@ impl<'a> App<'a> {
             } else {
                 all.into_iter()
                     .filter(|r| match r {
-                        VisibleRow::File { file, .. } => file.path.contains(f),
-                        VisibleRow::Dir { path, .. } => path.contains(f),
+                        VisibleRow::File { file, .. } => file.path.starts_with(f),
+                        VisibleRow::Dir { path, .. } => path.starts_with(f),
                     })
                     .collect()
             }
@@ -175,10 +201,11 @@ impl<'a> App<'a> {
             (KeyCode::Char('2'), KeyModifiers::NONE) => self.set_mode(ComparisonMode::StagedVsHead),
             (KeyCode::Char('3'), KeyModifiers::NONE) => self.set_mode(ComparisonMode::StagedVsWorking),
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                let _ = self.reload();
+                let _ = self.reload(true);
             }
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
                 self.filter = Some(String::new());
+                self.cursor = 0;
             }
             (KeyCode::Char('?'), KeyModifiers::NONE) => {
                 self.overlay = Some(Overlay::Help);
@@ -244,7 +271,7 @@ impl<'a> App<'a> {
             self.mode = ComparisonMode::CommitVsHead;
             self.overlay = None;
             self.filter = None;
-            let _ = self.reload();
+            let _ = self.reload(false);
         } else if matches!(key.code, KeyCode::Esc) || key.code == KeyCode::Char('?') {
             self.overlay = None;
         }
@@ -257,7 +284,7 @@ impl<'a> App<'a> {
         self.mode = mode;
         self.selected_commit = None;
         self.filter = None;
-        let _ = self.reload();
+        let _ = self.reload(false);
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -361,8 +388,12 @@ impl<'a> App<'a> {
                 };
                 match sides {
                     Ok(sides) => {
+                        let big = sides.original.as_deref().map(line_count).unwrap_or(0) > LINE_LIMIT
+                            || sides.changed.as_deref().map(line_count).unwrap_or(0) > LINE_LIMIT;
                         self.diff_rows = if file.is_binary {
                             Vec::new()
+                        } else if big {
+                            plain_rows(sides.original.as_deref(), sides.changed.as_deref())
                         } else {
                             align_rows(sides.original.as_deref(), sides.changed.as_deref())
                         };
@@ -382,10 +413,6 @@ impl<'a> App<'a> {
                 self.diff_rows = Vec::new();
             }
         }
-    }
-
-    pub fn quit(&self) -> bool {
-        false
     }
 
     pub fn render(&mut self, f: &mut Frame) {
@@ -548,29 +575,39 @@ impl<'a> App<'a> {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
 
+        let scrollbar_needed = self.diff_rows.len() > (area.height.saturating_sub(2)) as usize;
+
         match file {
             Some(f) => {
+                let orig_title = self.pane_title(&orig_label, &f, true);
+                let changed_title = self.pane_title(&changed_label, &f, false);
                 if f.is_binary {
-                    self.render_placeholder_pane(frame, left[0], &orig_label, "(binary file)");
-                    self.render_placeholder_pane(frame, left[1], &changed_label, "(binary file)");
+                    self.render_placeholder_pane_with_title(frame, left[0], &orig_title, "(binary file)");
+                    self.render_placeholder_pane_with_title(frame, left[1], &changed_title, "(binary file)");
                     return;
                 }
                 let orig_empty = self.diff_rows.iter().all(|r| r.original.is_none());
                 let changed_empty = self.diff_rows.iter().all(|r| r.changed.is_none());
                 if orig_empty {
-                    self.render_placeholder_pane(frame, left[0], &orig_label, "(no original content)");
+                    self.render_placeholder_pane_with_title(frame, left[0], &orig_title, "(no original content)");
                 } else {
-                    self.render_diff_pane(frame, left[0], &orig_label, true, false);
+                    self.render_diff_pane(frame, left[0], &orig_title, true);
                 }
                 if changed_empty {
-                    self.render_placeholder_pane(frame, left[1], &changed_label, "(no changed content)");
+                    self.render_placeholder_pane_with_title(frame, left[1], &changed_title, "(no changed content)");
                 } else {
-                    self.render_diff_pane(frame, left[1], &changed_label, false, false);
+                    self.render_diff_pane(frame, left[1], &changed_title, false);
                 }
             }
             None => {
                 let msg = if self.files.is_empty() {
-                    "(no changes)"
+                    if self.mode == ComparisonMode::CommitVsHead {
+                        "无差异"
+                    } else if !self.has_commits && self.mode != ComparisonMode::WorkingVsHead {
+                        "无可用对比（仓库还没有 commit）"
+                    } else {
+                        "(no changes)"
+                    }
                 } else {
                     "(select a file)"
                 };
@@ -578,9 +615,22 @@ impl<'a> App<'a> {
                 self.render_placeholder_pane_with_title(frame, left[1], &changed_label, msg);
             }
         }
+
+        if scrollbar_needed {
+            self.render_scrollbar(frame, area);
+        }
     }
 
-    fn render_diff_pane(&mut self, frame: &mut Frame, area: Rect, label: &str, is_original: bool, _: bool) {
+    fn pane_title(&self, label: &str, file: &ChangedFile, _is_original: bool) -> String {
+        let rename = file.old_path.as_deref().unwrap_or("");
+        if !rename.is_empty() && file.status == Status::Renamed {
+            format!("{} · {} → {}", label, rename, file.path)
+        } else {
+            format!("{} · {}", label, file.path)
+        }
+    }
+
+    fn render_diff_pane(&mut self, frame: &mut Frame, area: Rect, label: &str, is_original: bool) {
         let block = Block::default()
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
@@ -612,7 +662,9 @@ impl<'a> App<'a> {
                 LineKind::Insert => (Color::Green, styles::ADD_BG),
                 LineKind::Equal => (Color::White, Color::Reset),
             };
-            let content = truncate(&cell.text, inner.width.saturating_sub(8) as usize);
+            let avail = inner.width.saturating_sub(8) as usize;
+            let content = slice_after_hscroll(&cell.text, self.diff_hscroll);
+            let content = truncate(&content, avail);
             let line = Line::from(vec![
                 Span::styled(format!("{:>3} ", cell.num), Style::default().fg(styles::DIM)),
                 Span::styled(marker, Style::default().fg(fg).add_modifier(Modifier::BOLD)),
@@ -620,21 +672,21 @@ impl<'a> App<'a> {
             ]);
             frame.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
         }
-        self.render_scrollbar(frame, area, inner);
     }
 
-    fn render_scrollbar(&mut self, frame: &mut Frame, area: Rect, inner: Rect) {
-        if self.diff_rows.len() <= inner.height as usize {
+    fn render_scrollbar(&mut self, frame: &mut Frame, area: Rect) {
+        let inner_height = area.height.saturating_sub(2) as usize;
+        if self.diff_rows.len() <= inner_height {
             return;
         }
         let total = self.diff_rows.len();
-        let viewport = inner.height.saturating_sub(1) as usize;
-        let pos = (self.diff_vscroll as f64 / total as f64) * inner.height as f64;
-        let size = (viewport as f64 / total as f64 * inner.height as f64).max(1.0);
-        let track = inner.y + 1;
+        let viewport = inner_height.max(1);
+        let pos = (self.diff_vscroll as f64 / total as f64) * inner_height as f64;
+        let size = (viewport as f64 / total as f64 * inner_height as f64).max(1.0);
+        let track = area.y + 1;
         let x = area.x + area.width.saturating_sub(1);
-        for i in 0..inner.height {
-            let bar_y = track + i;
+        for i in 0..inner_height {
+            let bar_y = track + i as u16;
             let is_bar = (bar_y as f64) >= pos && (bar_y as f64) < pos + size;
             let ch = if is_bar { "█" } else { "░" };
             frame.render_widget(
@@ -642,10 +694,6 @@ impl<'a> App<'a> {
                 Rect { x, y: bar_y, width: 1, height: 1 },
             );
         }
-    }
-
-    fn render_placeholder_pane(&mut self, frame: &mut Frame, area: Rect, label: &str, msg: &str) {
-        self.render_placeholder_pane_with_title(frame, area, label, msg);
     }
 
     fn render_placeholder_pane_with_title(&mut self, f: &mut Frame, area: Rect, label: &str, msg: &str) {
@@ -662,6 +710,14 @@ impl<'a> App<'a> {
 
     fn render_statusbar(&mut self, f: &mut Frame, area: Rect) {
         let mut spans: Vec<Span> = Vec::new();
+        let mode_tag = match self.mode {
+            ComparisonMode::WorkingVsHead => "[模式A]",
+            ComparisonMode::StagedVsHead => "[模式B]",
+            ComparisonMode::StagedVsWorking => "[模式C]",
+            ComparisonMode::CommitVsHead => "[模式D]",
+        };
+        spans.push(Span::styled(mode_tag, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        spans.push(Span::raw(" "));
         if self.loading {
             spans.push(Span::styled("loading...", Style::default().fg(Color::Yellow)));
         } else if !self.status.is_empty() {
@@ -680,15 +736,15 @@ impl<'a> App<'a> {
         }
 
         let mut hint: Vec<Span> = vec![
-            key_hint("↑↓", "移动"),
-            key_hint("→←", "展开/折叠"),
-            key_hint("l", "commit"),
-            key_hint("1/2/3", "模式"),
-            key_hint("/", "过滤"),
-            key_hint("n/N", "hunk"),
-            key_hint("r", "刷新"),
-            key_hint("?", "帮助"),
-            key_hint("q", "退出"),
+            key_hint("↑↓"),
+            key_hint("→←"),
+            key_hint("l"),
+            key_hint("1/2/3"),
+            key_hint("/"),
+            key_hint("n/N"),
+            key_hint("r"),
+            key_hint("?"),
+            key_hint("q"),
         ];
         if let Some(f) = &self.filter {
             let f = f.clone();
@@ -831,6 +887,22 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", out)
 }
 
+fn slice_after_hscroll(s: &str, hscroll: usize) -> String {
+    if hscroll == 0 {
+        return s.to_string();
+    }
+    let mut acc = 0;
+    let mut out = String::new();
+    for c in s.chars() {
+        let cw = UnicodeWidthStr::width(c.to_string().as_str());
+        if acc >= hscroll {
+            out.push(c);
+        }
+        acc += cw;
+    }
+    out
+}
+
 fn pad_right(s: &str, width: usize) -> String {
     let w = UnicodeWidthStr::width(s);
     if w >= width {
@@ -849,7 +921,7 @@ fn pad_left(s: &str, width: usize) -> String {
     }
 }
 
-fn key_hint<'a>(key: &'a str, _desc: &'a str) -> Span<'a> {
+fn key_hint<'a>(key: &'a str) -> Span<'a> {
     Span::styled(format!("[{}]", key), styles::key_style())
         .to_owned()
 }

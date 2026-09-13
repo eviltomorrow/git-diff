@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 
 use git_diff::git::SystemRunner;
 use git_diff::tui;
@@ -33,5 +33,5 @@ fn main() -> anyhow::Result<()> {
     let root = repo_root()?;
     let commits = has_commits(&root);
     let runner = SystemRunner::new(root.clone());
-    tui::run(&runner, root, commits).map_err(|e| anyhow!("{}", e))
+    tui::run(&runner, root, commits)
 }

@@ -79,7 +79,7 @@ fn parse_log_format() {
 }
 
 #[test]
-fn changed_files_mode_a_combines_numstat_status_and_untracked() {
+fn changed_files_mode_a_lists_modified() {
     let runner = FakeRunner::new(vec![
         (
             &["diff", "--numstat", "-M", "HEAD"],
@@ -89,26 +89,34 @@ fn changed_files_mode_a_combines_numstat_status_and_untracked() {
             &["diff", "--name-status", "-M", "HEAD"],
             "M\tsrc/main.rs\n",
         ),
-        (
-            &["ls-files", "--others", "--exclude-standard"],
-            "notes.md\n",
-        ),
     ]);
     let root = std::env::temp_dir();
-    let notes = root.join("notes.md");
-    std::fs::write(&notes, "a\nb\nc\n").unwrap();
     let facade = GitFacade::new(&runner, &root);
     let files = facade.changed_files(ComparisonMode::WorkingVsHead).unwrap();
-    assert_eq!(files.len(), 3);
+    assert_eq!(files.len(), 2);
     assert_eq!(files[0].status, Status::Modified);
     assert_eq!(files[0].path, "src/main.rs");
     assert_eq!(files[0].added, 2);
     assert_eq!(files[1].status, Status::Modified);
     assert_eq!(files[1].path, "bin.dat");
     assert!(files[1].is_binary);
-    assert_eq!(files[2].status, Status::Untracked);
-    assert_eq!(files[2].path, "notes.md");
-    assert_eq!(files[2].added, 3);
+}
+
+#[test]
+fn untracked_files_lists_and_counts_untracked() {
+    let runner = FakeRunner::new(vec![(
+        &["ls-files", "--others", "--exclude-standard"],
+        "notes.md\n",
+    )]);
+    let root = std::env::temp_dir();
+    let notes = root.join("notes.md");
+    std::fs::write(&notes, "a\nb\nc\n").unwrap();
+    let facade = GitFacade::new(&runner, &root);
+    let files = facade.untracked_files().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].status, Status::Untracked);
+    assert_eq!(files[0].path, "notes.md");
+    assert_eq!(files[0].added, 3);
     let _ = std::fs::remove_file(&notes);
 }
 

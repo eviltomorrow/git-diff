@@ -117,13 +117,6 @@ pub fn count_changed(nodes: &[TreeNode]) -> usize {
         .sum()
 }
 
-pub fn rename_target(row: &VisibleRow) -> Option<&ChangedFile> {
-    match row {
-        VisibleRow::File { file, .. } => Some(file),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -162,7 +162,7 @@ impl<'a> GitFacade<'a> {
     }
 
     pub fn changed_files(&self, mode: ComparisonMode) -> anyhow::Result<Vec<ChangedFile>> {
-        let mut files = match mode {
+        let files = match mode {
             ComparisonMode::WorkingVsHead => self.changed_files_with(
                 &["diff", "--numstat", "-M", "HEAD"],
                 &["diff", "--name-status", "-M", "HEAD"],
@@ -180,25 +180,28 @@ impl<'a> GitFacade<'a> {
             }
         };
 
-        if mode == ComparisonMode::WorkingVsHead {
-            let untracked = self.run(&["ls-files", "--others", "--exclude-standard"])?;
-            for path in untracked.lines() {
-                if path.trim().is_empty() {
-                    continue;
-                }
-                let added = self
-                    .read_worktree(path)
-                    .map(|c| count_lines(&c) as u64)
-                    .unwrap_or(0);
-                files.push(ChangedFile {
-                    status: Status::Untracked,
-                    path: path.to_string(),
-                    old_path: None,
-                    added,
-                    deleted: 0,
-                    is_binary: false,
-                });
+        Ok(files)
+    }
+
+    pub fn untracked_files(&self) -> anyhow::Result<Vec<ChangedFile>> {
+        let untracked = self.run(&["ls-files", "--others", "--exclude-standard"])?;
+        let mut files = Vec::new();
+        for path in untracked.lines() {
+            if path.trim().is_empty() {
+                continue;
             }
+            let added = self
+                .read_worktree(path)
+                .map(|c| count_lines(&c) as u64)
+                .unwrap_or(0);
+            files.push(ChangedFile {
+                status: Status::Untracked,
+                path: path.to_string(),
+                old_path: None,
+                added,
+                deleted: 0,
+                is_binary: false,
+            });
         }
         Ok(files)
     }
@@ -220,8 +223,10 @@ impl<'a> GitFacade<'a> {
 
     fn fetch_ref(&self, rev: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let arg = format!("{}:{}", rev, path);
-        let out = self.run(&["show", &arg])?;
-        Ok(Some(out.into_bytes()))
+        match self.run(&["show", &arg]) {
+            Ok(out) => Ok(Some(out.into_bytes())),
+            Err(_) => Ok(None),
+        }
     }
 
     fn read_worktree(&self, path: &str) -> anyhow::Result<Vec<u8>> {
@@ -229,53 +234,34 @@ impl<'a> GitFacade<'a> {
             .with_context(|| format!("failed to read {}", path))
     }
 
-    fn origin_ref(mode: ComparisonMode, commit: Option<&str>) -> anyhow::Result<String> {
-        match (mode, commit) {
-            (ComparisonMode::WorkingVsHead, _) => Ok("HEAD".into()),
-            (ComparisonMode::StagedVsHead, _) => Ok("HEAD".into()),
-            (ComparisonMode::StagedVsWorking, _) => Ok("".into()),
-            (ComparisonMode::CommitVsHead, Some(c)) => Ok(c.to_string()),
-            (ComparisonMode::CommitVsHead, None) => Err(anyhow!("CommitVsHead requires a commit")),
-        }
-    }
-
-    fn changed_ref(mode: ComparisonMode, commit: Option<&str>) -> anyhow::Result<String> {
-        match (mode, commit) {
-            (ComparisonMode::WorkingVsHead, _) => Ok("WORKTREE".into()),
-            (ComparisonMode::StagedVsHead, _) => Ok("".into()),
-            (ComparisonMode::StagedVsWorking, _) => Ok("WORKTREE".into()),
-            (ComparisonMode::CommitVsHead, Some(_)) => Ok("HEAD".into()),
-            (ComparisonMode::CommitVsHead, None) => Err(anyhow!("CommitVsHead requires a commit")),
-        }
-    }
-
     pub fn file_sides(&self, mode: ComparisonMode, file: &ChangedFile) -> anyhow::Result<FileSides> {
-        let commit = match mode {
-            ComparisonMode::CommitVsHead => None,
-            _ => None,
-        };
-        let origin_ref = Self::origin_ref(mode, commit)?;
-        let changed_ref = Self::changed_ref(mode, commit)?;
-
         let origin_path = file.old_path.as_deref().unwrap_or(&file.path);
-
-        let original = if file.status == Status::Added || file.status == Status::Untracked {
-            None
-        } else if origin_ref == "WORKTREE" {
-            self.read_worktree(origin_path).ok()
-        } else {
-            self.fetch_ref(&origin_ref, origin_path)?
-        };
-
-        let changed = if file.status == Status::Deleted {
-            None
-        } else if changed_ref == "WORKTREE" {
-            self.read_worktree(&file.path).ok()
-        } else {
-            self.fetch_ref(&changed_ref, &file.path)?
-        };
-
-        Ok(FileSides { original, changed })
+        match mode {
+            ComparisonMode::CommitVsHead => Err(anyhow!("use file_sides_between")),
+            _ => {
+                let no_origin = file.status == Status::Added || file.status == Status::Untracked;
+                let no_changed = file.status == Status::Deleted;
+                let (original, changed) = match mode {
+                    ComparisonMode::WorkingVsHead => (
+                        if no_origin { None } else { self.fetch_ref("HEAD", origin_path)? },
+                        if no_changed { None } else { self.read_worktree(&file.path).ok() },
+                    ),
+                    ComparisonMode::StagedVsHead => (
+                        if no_origin { None } else { self.fetch_ref("HEAD", origin_path)? },
+                        if no_changed { None } else { self.fetch_ref("", &file.path)? },
+                    ),
+                    ComparisonMode::StagedVsWorking => (
+                        if no_origin { None } else { self.fetch_ref("", origin_path)? },
+                        if no_changed { None } else { self.read_worktree(&file.path).ok() },
+                    ),
+                    ComparisonMode::CommitVsHead => unreachable!(),
+                };
+                Ok(FileSides {
+                    original,
+                    changed,
+                })
+            }
+        }
     }
 
     pub fn file_sides_between(&self, commit: &str, file: &ChangedFile) -> anyhow::Result<FileSides> {

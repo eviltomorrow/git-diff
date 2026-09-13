@@ -123,21 +123,49 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
     rows
 }
 
+fn is_change(row: &AlignedRow) -> bool {
+    row.original.as_ref().map(|c| c.kind != LineKind::Equal).unwrap_or(false)
+        || row.changed.as_ref().map(|c| c.kind != LineKind::Equal).unwrap_or(false)
+}
+
 pub fn hunk_starts(rows: &[AlignedRow]) -> Vec<usize> {
     let mut starts = Vec::new();
     for (i, row) in rows.iter().enumerate() {
-        let is_change = row.original.as_ref().map(|c| c.kind != LineKind::Equal).unwrap_or(false)
-            || row.changed.as_ref().map(|c| c.kind != LineKind::Equal).unwrap_or(false);
-        if is_change {
-            let prev_is_change = i > 0
-                && (rows[i - 1].original.as_ref().map(|c| c.kind != LineKind::Equal).unwrap_or(false)
-                    || rows[i - 1].changed.as_ref().map(|c| c.kind != LineKind::Equal).unwrap_or(false));
+        if is_change(row) {
+            let prev_is_change = i > 0 && is_change(&rows[i - 1]);
             if !prev_is_change {
                 starts.push(i);
             }
         }
     }
     starts
+}
+
+pub fn plain_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<AlignedRow> {
+    let old_lines = to_lines(original);
+    let new_lines = to_lines(changed);
+    let mut rows = Vec::new();
+    for (i, l) in old_lines.iter().enumerate() {
+        rows.push(AlignedRow {
+            original: Some(Cell {
+                num: (i + 1) as u64,
+                text: l.clone(),
+                kind: LineKind::Equal,
+            }),
+            changed: None,
+        });
+    }
+    for (i, l) in new_lines.iter().enumerate() {
+        rows.push(AlignedRow {
+            original: None,
+            changed: Some(Cell {
+                num: (i + 1) as u64,
+                text: l.clone(),
+                kind: LineKind::Equal,
+            }),
+        });
+    }
+    rows
 }
 
 #[cfg(test)]

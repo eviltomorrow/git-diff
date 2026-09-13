@@ -998,19 +998,7 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
     }
 
     fn render_help(&mut self, f: &mut Frame, area: Rect) {
-        let width = 46u16.min(area.width.saturating_sub(4));
-        let height = 19u16.min(area.height.saturating_sub(2));
-        let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
-        let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
-        let panel = Rect { x, y, width, height };
-        Self::clear_area(f, panel);
-        let block = Block::default()
-            .title(" 帮助 ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .border_type(BorderType::Rounded);
-        let inner = block.inner(panel);
-        f.render_widget(block, panel);
+        const KEY_GAP: usize = 4;
         let help_lines = [
             ("Tab", "切换焦点（文件列表 / 对比区）"),
             ("文件列表焦点:", "操作变更文件列表"),
@@ -1029,9 +1017,35 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
             ("?", "本帮助"),
             ("q / Ctrl+C", "退出"),
         ];
+        let key_w = help_lines
+            .iter()
+            .map(|(k, _)| UnicodeWidthStr::width(*k))
+            .max()
+            .unwrap_or(0)
+            + KEY_GAP;
+        let desc_w = help_lines
+            .iter()
+            .map(|(_, d)| UnicodeWidthStr::width(*d))
+            .max()
+            .unwrap_or(0);
+        let width = ((key_w + desc_w) as u16)
+            .min(area.width.saturating_sub(4))
+            .max(30);
+        let height = (help_lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
+        let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
+        let panel = Rect { x, y, width, height };
+        Self::clear_area(f, panel);
+        let block = Block::default()
+            .title(" 帮助 ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .border_type(BorderType::Rounded);
+        let inner = block.inner(panel);
+        f.render_widget(block, panel);
         for (i, (k, d)) in help_lines.iter().enumerate() {
             let line = Line::from(vec![
-                Span::styled(pad_right(k, 22), styles::key_style()),
+                Span::styled(pad_right(k, key_w), styles::key_style()),
                 Span::styled(*d, Style::default().fg(Color::White)),
             ]);
             f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });

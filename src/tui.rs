@@ -569,7 +569,7 @@ impl<'a> App<'a> {
                 Line::from(vec![
                     marker,
                     Span::styled(
-                        truncate(&format!("{} {} 📁 {}", collapse, indent, short_name(path)), name_w),
+                        pad_right(&truncate(&format!("{} {} 📁 {}", collapse, indent, short_name(path)), name_w), name_w),
                         if is_selected { row_style.fg(Color::Yellow) } else { Style::default().fg(styles::DIR_FG) },
                     ),
                     Span::raw(" "),
@@ -593,7 +593,7 @@ impl<'a> App<'a> {
                 Line::from(vec![
                     marker,
                     Span::styled(
-                        truncate(&format!("{}{}", indent, name), name_w),
+                        pad_right(&truncate(&format!("{}{}", indent, name), name_w), name_w),
                         if is_selected { row_style.fg(Color::White) } else { Style::default().fg(Color::White) },
                     ),
                     Span::raw(" "),

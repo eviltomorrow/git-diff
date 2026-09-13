@@ -671,7 +671,7 @@ impl<'a> App<'a> {
     fn render_diffview(&mut self, frame: &mut Frame, area: Rect) {
         let file = self.diff_file.clone();
         let (orig_label, changed_label) = self.side_labels();
-        self.diff_viewport = area.height.saturating_sub(2) as usize;
+        self.diff_viewport = area.height.saturating_sub(3) as usize;
         let left = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -732,7 +732,7 @@ impl<'a> App<'a> {
         }
 
         if scrollbar_needed {
-            self.render_scrollbar(frame, area);
+            self.render_scrollbar(frame, left[1]);
         }
     }
 
@@ -792,20 +792,22 @@ impl<'a> App<'a> {
         }
     }
 
-    fn render_scrollbar(&mut self, frame: &mut Frame, area: Rect) {
-        let inner_height = area.height.saturating_sub(2) as usize;
-        if self.diff_rows.len() <= inner_height {
+    fn render_scrollbar(&mut self, frame: &mut Frame, pane: Rect) {
+        let total = self.diff_rows.len();
+        let viewport = self.diff_viewport.max(1);
+        if total <= viewport {
             return;
         }
-        let total = self.diff_rows.len();
-        let viewport = inner_height.max(1);
-        let pos = (self.diff_vscroll as f64 / total as f64) * inner_height as f64;
-        let size = (viewport as f64 / total as f64 * inner_height as f64).max(1.0);
-        let track = area.y + 1;
-        let x = area.x + area.width.saturating_sub(1);
-        for i in 0..inner_height {
-            let bar_y = track + i as u16;
-            let is_bar = (bar_y as f64) >= pos && (bar_y as f64) < pos + size;
+        // draw inside the right pane, one column left of its right border
+        let x = pane.x + pane.width.saturating_sub(3);
+        let track_h = (pane.height.saturating_sub(2)) as usize;
+        let max_scroll = total.saturating_sub(viewport);
+        let ratio = self.diff_vscroll as f64 / max_scroll as f64;
+        let thumb_h = (viewport as f64 / total as f64 * track_h as f64).max(1.0);
+        let top = (ratio * (track_h as f64 - thumb_h)).round() as usize;
+        for i in 0..track_h {
+            let bar_y = pane.y + 1 + i as u16;
+            let is_bar = (i as f64) >= top as f64 && (i as f64) < top as f64 + thumb_h;
             let ch = if is_bar { "█" } else { "░" };
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(ch, Style::default().fg(styles::DIM)))),

@@ -888,8 +888,19 @@ impl<'a> App<'a> {
 }
 
 fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitEntry], cursor: usize) {
-        let width = 60u16.min(area.width.saturating_sub(4));
         const MAX_ROWS: usize = 20;
+        const SCROLL_W: usize = 2;
+        const MARKER_W: usize = 2;
+        const HASH_W: usize = 9;
+        const DATE_W: usize = 18;
+        let max_text = commits
+            .iter()
+            .map(|c| UnicodeWidthStr::width(c.title.as_str()))
+            .max()
+            .unwrap_or(0);
+        let width = ((max_text + MARKER_W + HASH_W + DATE_W + SCROLL_W) as u16)
+            .min(area.width.saturating_sub(4))
+            .max(40);
         let height = ((commits.len().min(MAX_ROWS) as u16) + 5)
             .min(area.height.saturating_sub(4))
             .max(7);
@@ -915,6 +926,8 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
         let max_start = commits.len().saturating_sub(visible);
         let start = cursor.saturating_sub(visible.saturating_sub(1)).min(max_start);
         let has_scroll = commits.len() > visible;
+        let content_w = inner.width.saturating_sub(2) as usize;
+        let title_w = content_w.saturating_sub(MARKER_W + HASH_W + DATE_W + SCROLL_W);
         for i in 0..visible {
             let idx = start + i;
             if idx >= commits.len() {
@@ -928,21 +941,22 @@ fn render_commit_picker(&mut self, f: &mut Frame, area: Rect, commits: &[CommitE
                 Style::default()
             };
             let marker = if selected { "▶" } else { " " };
-            let content_w = inner.width.saturating_sub(2) as usize;
+            let date_author = format!(" {:>12} {}", c.date, c.author);
+            let date_author = truncate(&date_author, DATE_W);
             let line = Line::from(vec![
                 Span::styled(marker, style),
                 Span::styled(format!(" {} ", c.short_hash), style.fg(Color::Cyan)),
-                Span::styled(truncate(&c.title, content_w.saturating_sub(42)), style),
-                Span::styled(format!(" {:>12} {}", c.date, c.author), style.fg(styles::DIM)),
-                Span::styled(" ", style),
+                Span::styled(pad_right(&truncate(&c.title, title_w), title_w), style),
+                Span::styled(pad_right(&date_author, DATE_W), style.fg(styles::DIM)),
+                Span::styled(" ".repeat(SCROLL_W), style),
             ]);
             f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
         }
         if has_scroll {
             let scroll_area = Rect {
-                x: inner.x + inner.width.saturating_sub(1),
+                x: inner.x + inner.width.saturating_sub(SCROLL_W as u16),
                 y: inner.y + 1,
-                width: 1,
+                width: SCROLL_W as u16,
                 height: inner.height.saturating_sub(3),
             };
             self.render_commit_scrollbar(f, scroll_area, commits.len(), visible, start);

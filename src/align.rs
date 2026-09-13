@@ -94,8 +94,27 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                         });
                     }
                 }
-                DiffTag::Replace => {
-                    for o in &old_lines[old_range] {
+DiffTag::Replace => {
+                    let old_slice = &old_lines[old_range];
+                    let new_slice = &new_lines[new_range];
+                    let pairs = old_slice.len().min(new_slice.len());
+                    for k in 0..pairs {
+                        old_num += 1;
+                        new_num += 1;
+                        rows.push(AlignedRow {
+                            original: Some(Cell {
+                                num: old_num,
+                                text: old_slice[k].clone(),
+                                kind: LineKind::Delete,
+                            }),
+                            changed: Some(Cell {
+                                num: new_num,
+                                text: new_slice[k].clone(),
+                                kind: LineKind::Insert,
+                            }),
+                        });
+                    }
+                    for o in &old_slice[pairs..] {
                         old_num += 1;
                         rows.push(AlignedRow {
                             original: Some(Cell {
@@ -106,7 +125,7 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                             changed: None,
                         });
                     }
-                    for n in &new_lines[new_range] {
+                    for n in &new_slice[pairs..] {
                         new_num += 1;
                         rows.push(AlignedRow {
                             original: None,
@@ -116,8 +135,8 @@ pub fn align_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
                                 kind: LineKind::Insert,
                             }),
                         });
-}
-            }
+                    }
+                }
         }
     }
     rows
@@ -201,13 +220,44 @@ mod tests {
     }
 
     #[test]
-    fn modified_line_is_delete_plus_insert() {
+    fn modified_line_aligns_both_sides() {
         let rows = align_rows(Some(b"foo()\n"), Some(b"bar()\n"));
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].original.as_ref().unwrap().text, "foo()");
-        assert_eq!(rows[0].changed, None);
-        assert_eq!(rows[1].original, None);
-        assert_eq!(rows[1].changed.as_ref().unwrap().text, "bar()");
+        assert_eq!(rows[0].original.as_ref().unwrap().kind, LineKind::Delete);
+        assert_eq!(rows[0].changed.as_ref().unwrap().text, "bar()");
+        assert_eq!(rows[0].changed.as_ref().unwrap().kind, LineKind::Insert);
+        assert_eq!(rows[0].original.as_ref().unwrap().num, 1);
+        assert_eq!(rows[0].changed.as_ref().unwrap().num, 1);
+    }
+
+    #[test]
+    fn replaced_block_pairs_then_spills() {
+        // 2 old lines replaced by 3 new: 2 aligned pairs + 1 extra insert
+        let rows = align_rows(Some(b"x\ny\nz\n"), Some(b"a\nb\nc\nd\n"));
+        // x→a, y→b paired; z deleted; c,d inserted => need to check content
+        let origs: Vec<(u64, &str, LineKind)> = rows
+            .iter()
+            .filter_map(|r| r.original.as_ref().map(|c| (c.num, c.text.as_str(), c.kind)))
+            .collect();
+        let news: Vec<(u64, &str, LineKind)> = rows
+            .iter()
+            .filter_map(|r| r.changed.as_ref().map(|c| (c.num, c.text.as_str(), c.kind)))
+            .collect();
+        // x,y,z all on original side (x,y paired, z deleted)
+        assert_eq!(origs.len(), 3);
+        assert_eq!(origs[0], (1, "x", LineKind::Delete));
+        assert_eq!(origs[1], (2, "y", LineKind::Delete));
+        assert_eq!(origs[2], (3, "z", LineKind::Delete));
+        // a,b paired on changed side; c,d inserted
+        assert_eq!(news.len(), 4);
+        assert_eq!(news[0], (1, "a", LineKind::Insert));
+        assert_eq!(news[1], (2, "b", LineKind::Insert));
+        assert_eq!(news[2], (3, "c", LineKind::Insert));
+        assert_eq!(news[3], (4, "d", LineKind::Insert));
+        // paired rows carry both sides
+        assert!(rows[0].original.is_some() && rows[0].changed.is_some());
+        assert!(rows[1].original.is_some() && rows[1].changed.is_some());
     }
 
     #[test]

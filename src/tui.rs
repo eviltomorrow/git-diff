@@ -1047,10 +1047,15 @@ impl<'a> App<'a> {
         // right-aligned hint block
         let mut right: Vec<Span> = Vec::new();
         if let Some(f) = &self.filter {
-            let f = f.clone();
-            right.push(Span::styled("filter:", styles::key_style()));
-            right.push(Span::styled(format!("{} ", f), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
-            right.push(Span::styled("Esc取消", Style::default().fg(styles::DIM)));
+            // while filtering, show the input as a highlighted box after the status info
+            left.push(Span::styled(" │ ", styles::status_sep_style()));
+            left.push(Span::styled(" ", Style::default().bg(styles::FILTER_BG)));
+            left.push(Span::styled(
+                format!(" / {} ", f),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD).bg(styles::FILTER_BG),
+            ));
+            right.push(Span::styled("│ [Esc]", styles::key_style()));
+            right.push(Span::styled("取消", Style::default().fg(styles::DIM)));
         } else {
             let hints: [(&str, &str); 10] = [
                 ("Tab", "焦点"),

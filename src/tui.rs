@@ -285,7 +285,19 @@ impl<'a> App<'a> {
                 // handled by caller to exit
             }
             (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                if self.has_commits {
+                // re-enter the last selected commit comparison if we already
+                // have one; otherwise open the commit picker
+                let idx = self.mode_index(ComparisonMode::CommitVsHead);
+                if self.mode != ComparisonMode::CommitVsHead
+                    && self.mode_state[idx].selected_commit.is_some()
+                {
+                    self.save_mode_state();
+                    self.mode = ComparisonMode::CommitVsHead;
+                    self.selected_commit = self.mode_state[idx].selected_commit.clone();
+                    self.filter = None;
+                    let _ = self.reload(false);
+                    self.restore_mode_nav(idx);
+                } else if self.has_commits {
                     match self.facade.commits() {
                         Ok(commits) => {
                             self.overlay = Some(Overlay::CommitPicker { commits, cursor: 0 });
@@ -383,6 +395,9 @@ impl<'a> App<'a> {
             self.mode = ComparisonMode::CommitVsHead;
             self.overlay = None;
             self.filter = None;
+            // remember the chosen commit so `l` can re-enter this comparison
+            let idx = self.mode_index(ComparisonMode::CommitVsHead);
+            self.mode_state[idx].selected_commit = self.selected_commit.clone();
             let _ = self.reload(false);
         } else if matches!(key.code, KeyCode::Esc) || key.code == KeyCode::Char('?') {
             self.overlay = None;
@@ -398,11 +413,14 @@ impl<'a> App<'a> {
         self.mode = mode;
         self.selected_commit = self.mode_state[self.mode_index(mode)].selected_commit.clone();
         self.filter = None;
-        // reload to load the target mode's file set
         let idx = self.mode_index(mode);
+        // reload to load the target mode's file set, then restore its state
         let _ = self.reload(false);
-        // restore the target mode's saved navigation by path (file sets differ
-        // between modes, so indexes are meaningless)
+        self.restore_mode_nav(idx);
+    }
+
+    /// Restores a mode's saved list/diff navigation after its files are loaded.
+    fn restore_mode_nav(&mut self, idx: usize) {
         self.collapsed = self.mode_state[idx].collapsed.clone();
         let saved_path = self.mode_state[idx].selected_path.clone();
         if let Some(path) = saved_path {

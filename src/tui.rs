@@ -230,8 +230,7 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
 
     let selected_style = Style::default()
         .fg(Color::White)
-        .add_modifier(Modifier::BOLD)
-        .bg(styles::SELECT_ROW_BG);
+        .add_modifier(Modifier::BOLD);
     let row_style = if is_selected { selected_style } else { Style::default() };
     let width = inner.width as usize;
 

@@ -11,9 +11,6 @@ pub const STATUS_ERR: Color = Color::Red;
 pub const DIM: Color = Color::DarkGray;
 pub const HINT: Color = Color::Gray;
 
-/// Background for the selected file-list row (whole row highlight).
-pub const SELECT_ROW_BG: Color = Color::Rgb(44, 54, 74);
-
 pub const MODIFIED_FG: Color = Color::Yellow;
 pub const ADDED_FG: Color = Color::Green;
 pub const DELETED_FG: Color = Color::Red;

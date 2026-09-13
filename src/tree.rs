@@ -206,7 +206,13 @@ fn walk(
                     guide,
                 });
                 if !is_collapsed {
-                    let child_prefix = format!("{}{}", prefix, if is_last { "  " } else { "│ " });
+                    // the repo-root wrapper has no connector, so its children
+                    // start at column 0 rather than inheriting an indent
+                    let child_prefix = if depth == 0 {
+                        String::new()
+                    } else {
+                        format!("{}{}", prefix, if is_last { "  " } else { "│ " })
+                    };
                     walk(children, collapsed, &child_prefix, &path, depth + 1, out);
                 }
             }
@@ -294,7 +300,11 @@ pub fn filtered_rows(
                         deleted: *deleted,
                         guide,
                     });
-                    let child_prefix = format!("{}{}", prefix, if is_last { "  " } else { "│ " });
+                    let child_prefix = if depth == 0 {
+                        String::new()
+                    } else {
+                        format!("{}{}", prefix, if is_last { "  " } else { "│ " })
+                    };
                     walk(children, pred, &child_prefix, &path, depth + 1, out);
                 }
                 TreeNode::File(f) => out.push(VisibleRow::File {

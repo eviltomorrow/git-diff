@@ -218,6 +218,16 @@ pub fn hunk_starts(rows: &[AlignedRow]) -> Vec<usize> {
     starts
 }
 
+/// Returns the 1-based index of the hunk containing `cursor_row`,
+/// or 0 when the cursor is above the first hunk.
+pub fn hunk_index(starts: &[usize], cursor_row: usize) -> usize {
+    starts
+        .iter()
+        .rposition(|&s| s <= cursor_row)
+        .map(|i| i + 1)
+        .unwrap_or(0)
+}
+
 pub fn plain_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<AlignedRow> {
     let old_lines = to_lines(original);
     let new_lines = to_lines(changed);
@@ -358,6 +368,17 @@ mod tests {
         );
         let starts = hunk_starts(&rows);
         assert_eq!(starts.len(), 2);
+    }
+
+    #[test]
+    fn hunk_index_picks_last_containing_hunk() {
+        let starts = vec![5, 40];
+        assert_eq!(hunk_index(&starts, 0), 0);
+        assert_eq!(hunk_index(&starts, 5), 1);
+        assert_eq!(hunk_index(&starts, 39), 1);
+        assert_eq!(hunk_index(&starts, 40), 2);
+        assert_eq!(hunk_index(&starts, 59), 2);
+        assert_eq!(hunk_index(&[], 10), 0);
     }
 
     #[test]

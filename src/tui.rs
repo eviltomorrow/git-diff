@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::align::{align_rows, hunk_starts, plain_rows, AlignedRow, LineKind};
+use crate::align::{align_rows, hunk_index, hunk_starts, plain_rows, AlignedRow, LineKind};
 use crate::git::{GitFacade, GitRunner};
 use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
@@ -459,12 +459,7 @@ impl<'a> App<'a> {
     fn sync_hunk_idx(&mut self) {
         let starts = hunk_starts(&self.diff_rows);
         self.hunk_count = starts.len();
-        let cursor_row = self.diff_cursor;
-        self.hunk_idx = starts
-            .iter()
-            .position(|&s| s <= cursor_row)
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        self.hunk_idx = hunk_index(&starts, self.diff_cursor);
     }
 
     fn load_diff(&mut self) {
@@ -815,7 +810,7 @@ impl<'a> App<'a> {
                 }
                 let run_len = end - start;
                 let cursor_in_run = self.diff_cursor >= start && self.diff_cursor < end;
-                if real == start && run_len > FOLD_MIN && !cursor_in_run {
+                if run_len > FOLD_MIN && !cursor_in_run {
                     self.render_diff_row(frame, inner, content_w, start, screen, is_original);
                     screen += 1;
                     if screen >= height {
@@ -832,7 +827,12 @@ impl<'a> App<'a> {
                         Rect { x: inner.x + 1, y: inner.y + 1 + screen as u16, width: row_rect_w, height: 1 },
                     );
                     screen += 1;
-                    real = end - 1; // last line of run shown next
+                    if screen >= height {
+                        break;
+                    }
+                    self.render_diff_row(frame, inner, content_w, end - 1, screen, is_original);
+                    screen += 1;
+                    real = end;
                     continue;
                 }
             }

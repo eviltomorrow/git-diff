@@ -236,7 +236,7 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
     let width = inner.width as usize;
 
     let marker = if is_selected {
-        Span::styled("▌ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD).bg(styles::SELECT_ROW_BG))
+        Span::styled("│ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     } else {
         Span::raw("  ")
     };

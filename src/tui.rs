@@ -53,6 +53,8 @@ pub struct App<'a> {
     overlay: Option<Overlay>,
     focus: Focus,
     diff_viewport: usize,
+    diff_hviewport: usize,
+    diff_max_line_w: usize,
     list_viewport: usize,
     loading: bool,
     status: String,
@@ -79,6 +81,8 @@ impl<'a> App<'a> {
             overlay: None,
             focus: Focus::FileList,
             diff_viewport: 0,
+            diff_hviewport: 0,
+            diff_max_line_w: 0,
             list_viewport: 0,
             loading: false,
             status: String::new(),
@@ -382,14 +386,18 @@ impl<'a> App<'a> {
     }
 
     fn scroll_diff(&mut self, delta: isize) {
-        let max = self.diff_rows.len().saturating_sub(1);
+        let viewport = self.diff_viewport.max(1);
+        let max = self.diff_rows.len().saturating_sub(viewport);
         let new = (self.diff_vscroll as isize + delta).clamp(0, max as isize);
         self.diff_vscroll = new as usize;
         self.sync_hunk_idx();
     }
 
     fn scroll_horizontal(&mut self, delta: isize) {
-        let new = (self.diff_hscroll as isize + delta * 8).max(0);
+        let viewport_w = self.diff_hviewport.max(1);
+        let max_w = self.diff_max_line_w.max(viewport_w);
+        let max = max_w.saturating_sub(viewport_w);
+        let new = (self.diff_hscroll as isize + delta * 8).clamp(0, max as isize);
         self.diff_hscroll = new as usize;
     }
 
@@ -668,6 +676,19 @@ impl<'a> App<'a> {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(area);
+
+        self.diff_max_line_w = self
+            .diff_rows
+            .iter()
+            .filter_map(|r| {
+                r.original
+                    .as_ref()
+                    .or(r.changed.as_ref())
+                    .map(|c| UnicodeWidthStr::width(c.text.as_str()))
+            })
+            .max()
+            .unwrap_or(0);
+        self.diff_hviewport = left[0].width.saturating_sub(10) as usize;
 
         let scrollbar_needed = self.diff_rows.len() > (area.height.saturating_sub(2)) as usize;
 

@@ -28,8 +28,6 @@ pub const INLINE_DEL_BG: Color = Color::Rgb(175, 62, 60);
 pub const TRAILING_WS_BG: Color = Color::Rgb(150, 90, 40);
 /// Background for the current diff cursor line.
 pub const CURSOR_BG: Color = Color::Rgb(40, 50, 70);
-/// Background for the active filter input box.
-pub const FILTER_BG: Color = Color::Rgb(35, 45, 60);
 
 pub fn status_fg(status: crate::model::Status) -> Color {
     match status {

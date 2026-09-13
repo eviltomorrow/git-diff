@@ -170,14 +170,10 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
     const PLUS_W: usize = 4;
     const MINUS_W: usize = 4;
     const GAP: usize = 1;
-    const SCROLL_W: usize = 1;
     let list_height = inner.height.saturating_sub(2) as usize;
-    let scrollbar_needed = rows.len() > list_height;
     let name_w = inner
         .width
-        .saturating_sub(
-            (MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3 * GAP + SCROLL_W * usize::from(scrollbar_needed)) as u16,
-        ) as usize;
+        .saturating_sub((MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3 * GAP) as u16) as usize;
 
     let header = Line::from(vec![
         Span::raw(" ".repeat(MARKER_W)),
@@ -212,38 +208,6 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
         }
         let is_selected = idx == ctrl.cursor;
         render_list_row(f, inner, &rows[idx], i as u16, is_selected, name_w);
-    }
-
-    if scrollbar_needed {
-        let scroll_area = Rect {
-            x: inner.x + inner.width.saturating_sub(SCROLL_W as u16 + 1),
-            y: inner.y + 2,
-            width: 1,
-            height: list_height as u16,
-        };
-        render_list_scrollbar(f, scroll_area, rows.len(), list_height, ctrl.list_scroll);
-    }
-}
-
-fn render_list_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
-    let h = area.height as usize;
-    let pos = if total <= visible {
-        0.0
-    } else {
-        (start as f64) / (total - visible) as f64
-    };
-    let size = (visible as f64 / total as f64 * h as f64).max(1.0);
-    let track_start = (pos * (h as f64 - size)).round() as usize;
-    for i in 0..h {
-        let ch = if (i as f64) >= track_start as f64 && (i as f64) < track_start as f64 + size {
-            "█"
-        } else {
-            "░"
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(ch, Style::default().fg(styles::DIM)))),
-            Rect { x: area.x, y: area.y + i as u16, width: 1, height: 1 },
-        );
     }
 }
 

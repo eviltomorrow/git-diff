@@ -179,6 +179,48 @@ fn sort_cycles_through_modes() {
 }
 
 #[test]
+fn sorting_reloads_the_diff_for_the_newly_selected_file() {
+    let mut ctrl = setup();
+    // path sort keeps lib.rs (alphabetically first) on row 1
+    ctrl.handle_key(key(KeyCode::Down));
+    assert_eq!(ctrl.diff_file.as_ref().unwrap().path, "lib.rs");
+    // two `s`: path -> status -> added; main.rs (2 added) now sorts before
+    // lib.rs (1 added), so the row under the cursor becomes main.rs
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(ctrl.sort, git_diff::tree::SortMode::Added);
+    match &ctrl.visible_rows()[ctrl.cursor] {
+        git_diff::tree::VisibleRow::File { file, .. } => assert_eq!(file.path, "main.rs"),
+        _ => panic!("expected a file row"),
+    }
+    assert_eq!(
+        ctrl.diff_file.as_ref().map(|f| f.path.as_str()),
+        Some("main.rs"),
+        "diff panel must follow the newly selected file, not stay on lib.rs"
+    );
+}
+
+#[test]
+fn cancelling_filter_resets_diff_to_selection() {
+    let mut ctrl = setup();
+    ctrl.handle_key(key(KeyCode::Down)); // -> lib.rs
+    assert_eq!(ctrl.diff_file.as_ref().unwrap().path, "lib.rs");
+    // start filtering then cancel: cursor returns to row 0 (the root dir) and
+    // the diff panel must not keep showing lib.rs
+    ctrl.handle_key(key(KeyCode::Char('/')));
+    for ch in ['l', 'i', 'b'] {
+        ctrl.handle_key(key(KeyCode::Char(ch)));
+    }
+    ctrl.handle_key(key(KeyCode::Esc));
+    assert!(ctrl.filter.is_none());
+    assert_eq!(ctrl.cursor, 0);
+    assert!(
+        ctrl.diff_file.is_none(),
+        "diff must clear when the selection leaves the file"
+    );
+}
+
+#[test]
 fn set_focus_switches_panels() {
     let mut ctrl = setup();
     assert_eq!(ctrl.focus, Focus::FileList);

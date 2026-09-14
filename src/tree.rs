@@ -17,7 +17,7 @@ pub enum TreeNode {
 }
 
 /// How sibling rows are ordered in the file list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SortMode {
     /// By path (directories first, then files alphabetically).
     Path,

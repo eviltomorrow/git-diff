@@ -30,6 +30,45 @@ pub struct App<'a> {
     /// mouse clicks onto the focused panel.
     list_rect: Rect,
     diff_rect: Rect,
+    /// Set when the selected diff changed (file switch, sort, filter, mode):
+    /// the next frame must be a full terminal redraw. ratatui's incremental
+    /// diff never emits cells that trail a double-width (CJK) glyph, so when a
+    /// wide glyph moves to a spot where the previous frame had other content,
+    /// the old character can linger on screen. A full redraw (clear + redraw)
+    /// wipes those cells first.
+    full_redraw: bool,
+}
+
+/// Which region of the screen may have changed between two frames. A full
+/// terminal redraw is only needed when a region containing wide (CJK)
+/// glyphs actually moved: ratatui's incremental diff never clears the cell
+/// that trails a double-width glyph, so only clearing the whole screen can
+/// remove it. Pure-ASCII scrolling needs no full redraw, which avoids the
+/// whole-screen flash some terminals show on every keypress.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NavKey {
+    diff_file: Option<String>,
+    cursor: usize,
+    list_scroll: usize,
+    diff_cursor: usize,
+    diff_vscroll: usize,
+    diff_hscroll: usize,
+    diff_rows_len: usize,
+    mode: ComparisonMode,
+    selected_commit: Option<String>,
+    files: Vec<ChangedFile>,
+    collapsed: Vec<String>,
+    sort: SortMode,
+    filter: Option<String>,
+    fold_unchanged: bool,
+    hunk_idx: usize,
+    hunk_count: usize,
+    search: Option<String>,
+    goto: Option<String>,
+    ignore_whitespace: bool,
+    status: String,
+    loading: bool,
+    overlay: u64,
 }
 
 impl<'a> App<'a> {
@@ -44,15 +83,145 @@ impl<'a> App<'a> {
             ctrl,
             list_rect: Rect::default(),
             diff_rect: Rect::default(),
+            full_redraw: true,
         })
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        let before = self.nav_key();
         self.ctrl.handle_key(key);
+        self.sync_full_redraw(before);
     }
 
-    /// Clicking inside the file list focuses the file list; clicking inside
-    /// the diff panel focuses the diff panel (a Tab variant).
+    pub fn nav_key(&self) -> NavKey {
+        let c = &self.ctrl;
+        let mut collapsed: Vec<String> = c.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        NavKey {
+            diff_file: c.diff_file.as_ref().map(|f| f.path.clone()),
+            cursor: c.cursor,
+            list_scroll: c.list_scroll,
+            diff_cursor: c.diff_cursor,
+            diff_vscroll: c.diff_vscroll,
+            diff_hscroll: c.diff_hscroll,
+            diff_rows_len: c.diff_rows.len(),
+            mode: c.mode,
+            selected_commit: c.selected_commit.clone(),
+            files: c.files.clone(),
+            collapsed,
+            sort: c.sort,
+            filter: c.filter.clone(),
+            fold_unchanged: c.fold_unchanged,
+            hunk_idx: c.hunk_idx,
+            hunk_count: c.hunk_count,
+            search: c.search.clone(),
+            goto: c.goto.clone(),
+            ignore_whitespace: c.ignore_whitespace,
+            status: c.status.clone(),
+            loading: c.loading,
+            overlay: overlay_key(c),
+        }
+    }
+
+    /// After handling a key / mouse event or drawing, call with the `nav_key()`
+    /// captured just before. Requests a full redraw only when a region that
+    /// actually contains wide (CJK) glyphs moved.
+    pub fn sync_full_redraw(&mut self, before: NavKey) {
+        let now = self.nav_key();
+        if now == before {
+            return;
+        }
+        // overlays cover the whole panel area -> always redraw fully
+        if now.overlay != before.overlay {
+            self.full_redraw = true;
+            return;
+        }
+        let diff_moved = now.diff_cursor != before.diff_cursor
+            || now.diff_vscroll != before.diff_vscroll
+            || now.diff_hscroll != before.diff_hscroll
+            || now.diff_rows_len != before.diff_rows_len;
+        let list_moved = now.cursor != before.cursor
+            || now.list_scroll != before.list_scroll
+            || now.collapsed != before.collapsed
+            || now.sort != before.sort
+            || now.filter != before.filter;
+        let switched = now.diff_file != before.diff_file
+            || now.mode != before.mode
+            || now.files != before.files
+            || now.selected_commit != before.selected_commit;
+        let other_moved = now.fold_unchanged != before.fold_unchanged
+            || now.search != before.search
+            || now.goto != before.goto
+            || now.ignore_whitespace != before.ignore_whitespace
+            || now.status != before.status
+            || now.loading != before.loading;
+        // the header's "行" wide glyph shifts when the line numbers change digit
+        // count (e.g. 9 -> 10), so a diff cursor move can need a full redraw
+        // even for ASCII content
+        let stats_shifted = digits(now.diff_cursor + 1) != digits(before.diff_cursor + 1)
+            || digits(now.diff_rows_len) != digits(before.diff_rows_len)
+            || now.hunk_idx != before.hunk_idx
+            || now.hunk_count != before.hunk_count;
+
+        let mut need = false;
+        if diff_moved {
+            need |= self.diff_has_wide() || stats_shifted;
+        }
+        if list_moved {
+            need |= self.list_has_wide();
+        }
+        if switched || other_moved {
+            need |= self.any_wide();
+        }
+        if need {
+            self.full_redraw = true;
+        }
+    }
+
+    fn diff_has_wide(&self) -> bool {
+        use unicode_width::UnicodeWidthChar;
+        self.ctrl.diff_rows.iter().any(|r| {
+            r.original
+                .as_ref()
+                .is_some_and(|x| x.text.chars().any(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) > 1))
+                || r.changed
+                    .as_ref()
+                    .is_some_and(|x| x.text.chars().any(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) > 1))
+        })
+    }
+
+    fn list_has_wide(&self) -> bool {
+        use unicode_width::UnicodeWidthChar;
+        self.ctrl.visible_rows().iter().any(|r| {
+            let name = match r {
+                crate::tree::VisibleRow::File { file, .. } => &file.path,
+                crate::tree::VisibleRow::Dir { path, .. } => path,
+            };
+            name.chars().any(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) > 1)
+        })
+    }
+
+    fn any_wide(&self) -> bool {
+        self.diff_has_wide()
+            || self.list_has_wide()
+            || self
+                .ctrl
+                .diff_file
+                .as_ref()
+                .is_some_and(|f| wide_str(&f.path))
+    }
+
+    /// Whether the next render must be a full redraw; consume the flag.
+    pub fn take_full_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.full_redraw)
+    }
+
+    /// Read-only access to the controller (used by tests to inspect state).
+    pub fn ctrl(&self) -> &Controller<'a> {
+        &self.ctrl
+    }
+
+    /// Clicking inside a panel focuses it (a Tab variant).
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             let in_list = rect_contains(self.list_rect, mouse.column, mouse.row);
@@ -126,24 +295,34 @@ fn render_header(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         }
         m => format!("比较模式: {}", m.label()),
     };
-    let mut spans: Vec<Span> = vec![
+    let mut spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
         Span::styled(mode_desc, styles::header_style()),
-        Span::styled(format!("  {}", path_str), Style::default().fg(Color::DarkGray)),
     ];
+    if let Some(branch) = &ctrl.branch {
+        spans.push(Span::styled(format!("  [{}]", branch), Style::default().fg(Color::Cyan)));
+    }
+    spans.push(Span::styled(format!("  {}", path_str), Style::default().fg(Color::DarkGray)));
     // diff position summary, right-aligned in the top row
     let stats = diff_status(ctrl);
-    if !stats.is_empty() {
-        let left_w: usize = spans.iter().map(|s| s.width()).sum();
-        let w = area.width as usize;
-        if left_w + stats.len() + 2 < w {
-            spans.push(Span::raw(" ".repeat(w - left_w - stats.len() - 2)));
-        } else {
-            spans.push(Span::raw(" "));
+    let w = area.width as usize;
+    if stats.is_empty() {
+        f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: area.x, y: area.y, width: area.width, height: 1 });
+    } else {
+        // Right-align the stats text to the very edge of the row. It slides
+        // horizontally when its length changes, but the event loop forces a
+        // full redraw on any navigation change, so the wide "行" glyph never
+        // leaves residue behind.
+        let stats_w = UnicodeWidthStr::width(stats.as_str());
+        let avail = w.saturating_sub(stats_w);
+        let mut out = truncate_spans(spans, avail);
+        let used: usize = out.iter().map(|s| s.width()).sum();
+        if used < avail {
+            out.push(Span::raw(" ".repeat(avail - used)));
         }
-        spans.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+        out.push(Span::styled(stats, Style::default().fg(Color::DarkGray)));
+        f.render_widget(Paragraph::new(Line::from(out)), Rect { x: area.x, y: area.y, width: area.width, height: 1 });
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: area.x, y: area.y, width: area.width, height: 1 });
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(area.width as usize),
@@ -323,6 +502,11 @@ fn amount_style(n: u64, positive: bool, is_selected: bool) -> Style {
 // ----------------------------------------------------------------- diff
 
 fn render_diffview(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
+    // Clear the whole panel up front so every cell is re-evaluated when the
+    // selected file changes. This defends against ghost residue from the
+    // previous file lingering at cells that a normal redraw would skip (e.g.
+    // cells that trail a double-width glyph).
+    f.render_widget(Clear, area);
     let file = ctrl.diff_file.clone();
     let (orig_label, changed_label) = ctrl.side_labels();
     let left = Layout::default()
@@ -748,21 +932,55 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         ];
         for (k, d) in hints.iter() {
             right.push(Span::styled(format!("[{}]", k), styles::key_style()));
-            right.push(Span::styled(format!("{} ", d), Style::default().fg(styles::DIM)));
+            right.push(Span::styled(*d, Style::default().fg(styles::DIM)));
         }
     }
 
-    let mut spans = left;
-    let left_w: usize = spans.iter().map(|s| s.width()).sum();
+    let spans = left;
     let right_w: usize = right.iter().map(|s| s.width()).sum();
     let w = area.width as usize;
-    if left_w + right_w + 2 < w {
-        spans.push(Span::raw(" ".repeat(w - left_w - right_w - 2)));
-    } else if !right.is_empty() {
-        spans.push(Span::raw(" "));
+    if right_w == 0 {
+        f.render_widget(Line::from(spans), area);
+        return;
     }
-    spans.extend(right);
-    f.render_widget(Line::from(spans), area);
+    // The right hint block is always anchored at the right edge. When the left
+    // content is too wide to fit beside it, we truncate the left content instead
+    // of letting the hints shift left: shifting would slide the wide (CJK) glyphs
+    // in the hints over cells that previously held other characters, and the
+    // ratatui diff skips the cells that trail a double-width glyph, so those old
+    // cells would linger on screen as ghost residue.
+    let right_x = w.saturating_sub(right_w + 1).max(1);
+    let avail = right_x.saturating_sub(1);
+    let mut out = truncate_spans(spans, avail);
+    let used: usize = out.iter().map(|s| s.width()).sum();
+    if used < avail {
+        out.push(Span::raw(" ".repeat(avail - used)));
+    }
+    out.extend(right);
+    f.render_widget(Line::from(out), area);
+}
+
+/// Copy `spans`, truncating so the total width is at most `avail`; a truncated
+/// tail is replaced with `…`. Styles are preserved.
+fn truncate_spans<'a>(spans: Vec<Span<'a>>, avail: usize) -> Vec<Span<'a>> {
+    let mut out: Vec<Span<'a>> = Vec::new();
+    let mut used = 0usize;
+    for s in spans {
+        if used >= avail {
+            break;
+        }
+        let tw = s.width();
+        if used + tw <= avail {
+            out.push(s);
+            used += tw;
+        } else {
+            let need = avail - used;
+            let text = s.content.as_ref();
+            out.push(Span::styled(truncate(text, need), s.style));
+            used = avail;
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------- overlays
@@ -989,6 +1207,36 @@ fn render_help(f: &mut Frame, area: Rect) {
 
 // ------------------------------------------------------------- helpers
 
+/// Whether a string contains any double-width (CJK) character.
+fn wide_str(s: &str) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    s.chars().any(|ch| UnicodeWidthChar::width(ch).unwrap_or(0) > 1)
+}
+
+/// Number of decimal digits in `n` (for `0` returns 1).
+fn digits(n: usize) -> usize {
+    n.max(1).to_string().len()
+}
+
+/// Fingerprint of the current overlay state (which panel it covers).
+fn overlay_key(c: &Controller<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match &c.overlay {
+        Some(Overlay::Help) => 0u8.hash(&mut h),
+        Some(Overlay::CommitPicker { commits, cursor }) => {
+            1u8.hash(&mut h);
+            cursor.hash(&mut h);
+            for e in commits {
+                e.short_hash.hash(&mut h);
+                e.title.hash(&mut h);
+            }
+        }
+        None => 2u8.hash(&mut h),
+    }
+    h.finish()
+}
+
 /// Whether a point falls inside a rect (inclusive of top-left, exclusive of
 /// bottom-right, matching ratatui's Rect semantics).
 fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
@@ -1081,7 +1329,20 @@ pub fn run<R: GitRunner>(
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App<'_>) -> Result<()> {
     loop {
+        let nav_before = app.nav_key();
+        if app.take_full_redraw() {
+            // Force a full terminal redraw: clear the screen, empty both ratatui
+            // buffers, then draw. The next flush then writes every cell, so
+            // cells that trail a double-width glyph get physically cleared by
+            // the terminal instead of lingering with the previous file's content.
+            terminal.clear()?;
+            terminal.swap_buffers();
+        }
         terminal.draw(|f| app.render(f))?;
+        // Some renderers adjust navigation state (e.g. keeping the list cursor
+        // visible), which means the frame we just drew was one scroll position
+        // behind. Re-draw fully next frame so no wide glyph shifts are skipped.
+        app.sync_full_redraw(nav_before);
         let event = crossterm::event::read()?;
         match event {
             Event::Key(key) => {

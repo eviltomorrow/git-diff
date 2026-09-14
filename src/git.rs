@@ -255,6 +255,17 @@ impl<'a> GitFacade<'a> {
         parse_log(&out)
     }
 
+    /// The current branch name (e.g. `main`), or `None` on a detached HEAD.
+    pub fn current_branch(&self) -> anyhow::Result<Option<String>> {
+        match self.run(&["symbolic-ref", "--short", "HEAD"]) {
+            Ok(out) => {
+                let name = out.trim();
+                Ok(if name.is_empty() { None } else { Some(name.to_string()) })
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     fn fetch_ref(&self, rev: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let arg = format!("{}:{}", rev, path);
         match self.run(&["show", &arg]) {

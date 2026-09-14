@@ -79,6 +79,8 @@ pub struct Controller<'a> {
     pub facade: GitFacade<'a>,
     pub repo_path: PathBuf,
     pub has_commits: bool,
+    /// Current git branch (e.g. `main`), or `None` on a detached HEAD.
+    pub branch: Option<String>,
     pub mode: ComparisonMode,
     pub selected_commit: Option<String>,
     mode_state: [ModeState; 4],
@@ -126,6 +128,7 @@ impl<'a> Controller<'a> {
             facade,
             repo_path,
             has_commits,
+            branch: None,
             mode: if initial_commit.is_some() {
                 ComparisonMode::CommitVsHead
             } else {
@@ -163,6 +166,7 @@ impl<'a> Controller<'a> {
         if let Some(c) = &ctrl.selected_commit {
             ctrl.mode_state[ctrl.mode_index(ComparisonMode::CommitVsHead)].selected_commit = Some(c.clone());
         }
+        ctrl.branch = ctrl.facade.current_branch().ok().flatten();
         ctrl.reload(false)?;
         Ok(ctrl)
     }
@@ -288,16 +292,19 @@ impl<'a> Controller<'a> {
                 (KeyCode::Char(c), KeyModifiers::NONE) => {
                     self.filter.as_mut().unwrap().push(c);
                     self.cursor = 0;
+                    self.load_diff();
                     return;
                 }
                 (KeyCode::Backspace, _) => {
                     self.filter.as_mut().unwrap().pop();
                     self.cursor = 0;
+                    self.load_diff();
                     return;
                 }
                 (KeyCode::Esc, _) => {
                     self.filter = None;
                     self.cursor = 0;
+                    self.load_diff();
                     return;
                 }
                 (KeyCode::Enter, _) => {
@@ -657,6 +664,10 @@ impl<'a> Controller<'a> {
             SortMode::Status => "排序: 状态".into(),
             SortMode::Added => "排序: 增行数".into(),
         };
+        // sorting reorders the list, so the row under the cursor may be a
+        // different file — reload the diff to match the new selection instead
+        // of leaving the previous file's content on the panel
+        self.load_diff();
     }
 
     /// Rebuild the cached tree from the current files, wrapped under a root

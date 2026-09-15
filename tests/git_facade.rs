@@ -41,6 +41,24 @@ fn parse_numstat_rename() {
 }
 
 #[test]
+fn parse_numstat_dir_rename_with_braces() {
+    // git abbreviates a rename that crosses directories as `{old => new}/file`
+    let out = "1\t1\t{cmd/util => pkg/wireshark}/wireshark.go\n";
+    let rows = parse_numstat(out, true).unwrap();
+    assert_eq!(rows[0].path, "pkg/wireshark/wireshark.go");
+    assert_eq!(rows[0].old_path.as_deref(), Some("cmd/util/wireshark.go"));
+}
+
+#[test]
+fn parse_numstat_file_rename_with_braces() {
+    // rename inside a directory keeps the shared prefix: `dir/{old => new}`
+    let out = "190\t276\tcmd/gobgp-ctl/cmd/{list_path.go => route_list.go}\n";
+    let rows = parse_numstat(out, true).unwrap();
+    assert_eq!(rows[0].path, "cmd/gobgp-ctl/cmd/route_list.go");
+    assert_eq!(rows[0].old_path.as_deref(), Some("cmd/gobgp-ctl/cmd/list_path.go"));
+}
+
+#[test]
 fn parse_numstat_binary() {
     let out = "-\t-\tbinary.png\n";
     let rows = parse_numstat(out, false).unwrap();

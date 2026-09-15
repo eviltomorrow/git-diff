@@ -59,6 +59,37 @@ pub struct StatusRow {
     pub old_path: Option<String>,
 }
 
+/// Expands one side of git's brace-abbreviated rename path back to the real
+/// path. With rename detection, `git diff --numstat` shortens the common
+/// prefix/suffix of a rename with braces, e.g. `{a/b => c/d}/e` (directory
+/// rename) or `a/{b => c}` (file rename inside a directory). `new` selects the
+/// side after the `=>`; the other side keeps the text before it. Braces that
+/// do not enclose a ` => ` are kept literally.
+fn rename_side(path: &str, new: bool) -> String {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let arrow = after.find(" => ");
+        let close = after.find('}');
+        if let Some(arrow) = arrow
+            && close.is_some_and(|c| arrow < c)
+        {
+            let close = arrow + 4 + after[arrow + 4..].find('}').expect("close inside braces");
+            let a = &after[..arrow];
+            let b = &after[arrow + 4..close];
+            out.push_str(if new { b } else { a });
+            rest = &after[close + 1..];
+        } else {
+            out.push('{');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn parse_numstat(out: &str, with_rename: bool) -> anyhow::Result<Vec<NumstatRow>> {
     let mut rows = Vec::new();
     for line in out.lines() {
@@ -80,9 +111,11 @@ pub fn parse_numstat(out: &str, with_rename: bool) -> anyhow::Result<Vec<Numstat
         };
         let (new_path, old_path) = if with_rename {
             if let Some(idx) = path.find(" => ") {
-                let old = path[..idx].to_string();
-                let new = path[idx + 4..].to_string();
-                (new, Some(old))
+                if path.contains('{') {
+                    (rename_side(path, true), Some(rename_side(path, false)))
+                } else {
+                    (path[idx + 4..].to_string(), Some(path[..idx].to_string()))
+                }
             } else {
                 (path.to_string(), None)
             }

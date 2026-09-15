@@ -431,3 +431,67 @@ fn file_list_collapse_sort_filter_leaves_no_stale() {
     let stale = full_redraw_walk(&mut app, &mut terminal, &moves);
     assert!(stale.is_empty(), "stale after list ops: {stale:?}");
 }
+
+/// A Go-style file whose lines are indented with tabs and contain CJK
+/// comments, mirroring real-world source. Long tab-indented lines previously
+/// overflowed the diff pane because the buffer counted a tab as one cell while
+/// the terminal expands it to a tab stop — leaving ghost residue on file
+/// switch. Tabs must be expanded to spaces before rendering.
+struct TabRunner;
+impl GitRunner for TabRunner {
+    fn run(&self, args: &[&str]) -> anyhow::Result<String> {
+        match args {
+            ["diff", "--numstat", "-M", "HEAD"] => Ok("46\t0\ttabbed.rs\n1\t0\tsmall.rs\n".into()),
+            ["diff", "--name-status", "-M", "HEAD"] => Ok("M\ttabbed.rs\nM\tsmall.rs\n".into()),
+            ["show", "HEAD:tabbed.rs"] => Ok(
+                "package cmd\n\nfunc ParseFamily(name string) (*api.Family, error) {\n\tif name == \"\" {\n\t\treturn nil, fmt.Errorf(\"family name is required\")\n\t}\n\t// 中文注释：地址族名解析\n\tf, ok := familyMap[name]\n\tif !ok {\n\t\treturn nil, fmt.Errorf(\"unknown family %q\", name)\n\t}\n\treturn f, nil\n}\n".into(),
+            ),
+            ["show", "HEAD:small.rs"] => Ok("short\n".into()),
+            _ => Ok(String::new()),
+        }
+    }
+}
+
+#[test]
+fn tabs_are_expanded_before_render() {
+    let facade = GitFacade::new(&TabRunner, &PathBuf::from("/tmp"));
+    let mut app = App::new(facade, PathBuf::from("/tmp"), true, None).unwrap();
+    let backend = LoggingBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    // rows: root(0), small.rs(1), tabbed.rs(2); select tabbed.rs
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        app.ctrl().diff_file.as_ref().map(|f| f.path.as_str()),
+        Some("tabbed.rs")
+    );
+    let frame = terminal.draw(|f| app.render(f)).unwrap();
+    // a raw tab byte written to the terminal would be expanded to a tab stop,
+    // overflowing the pane; every diff cell must be tab-free
+    let mut tabs: Vec<(u16, u16)> = Vec::new();
+    for y in 0..frame.buffer.area.height {
+        for x in 0..frame.buffer.area.width {
+            if let Some(c) = frame.buffer.cell((x, y)) && c.symbol().contains('\t') {
+                tabs.push((x, y));
+            }
+        }
+    }
+    assert!(tabs.is_empty(), "raw tabs reached the buffer: {tabs:?}");
+}
+
+/// Switching from a tab/CJK-heavy file to a short ASCII file must not leave
+/// residue: the diff rows that shrink must have every previously-written cell
+/// cleared (a tab overflow used to strand cells past the pane's right edge).
+#[test]
+fn tabbed_file_switch_leaves_no_stale_cells() {
+    let facade = GitFacade::new(&TabRunner, &PathBuf::from("/tmp"));
+    let mut app = App::new(facade, PathBuf::from("/tmp"), true, None).unwrap();
+    let backend = LoggingBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    // rows: root(0), small.rs(1), tabbed.rs(2)
+    app.handle_key(key(KeyCode::Down)); // small.rs
+    app.handle_key(key(KeyCode::Down)); // tabbed.rs (tab/CJK content)
+    let stale = walk_stale(&mut app, &mut terminal, &[KeyCode::Up]);
+    eprintln!("stale after tabbed switch: {:?}", stale);
+    assert!(stale.is_empty(), "tabbed switch stale: {stale:?}");
+}

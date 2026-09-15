@@ -1,4 +1,13 @@
 use similar::{ChangeTag, DiffTag, TextDiff};
+use unicode_width::UnicodeWidthStr;
+
+/// Tab stop used when expanding tabs in displayed diff lines. A literal tab
+/// byte sent to the terminal is expanded by the terminal to the next tab stop,
+/// which is far wider than the single cell ratatui's buffer accounts for, so
+/// long lines overflow the pane and leave ghost residue on file switch. We
+/// therefore expand tabs to spaces up front so the computed display width
+/// matches the terminal's.
+pub const TAB_STOP: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {
@@ -33,12 +42,35 @@ fn to_text(content: Option<&[u8]>) -> String {
     }
 }
 
+/// Replaces every tab with spaces up to the next `TAB_STOP`-column tab stop,
+/// so the display width of a line (as measured by [`UnicodeWidthStr`]) matches
+/// what a terminal actually renders. Keeps the line count unchanged, so diff
+/// ops that index into the line arrays stay valid.
+fn expand_tabs(line: &str) -> String {
+    if !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() + TAB_STOP);
+    let mut col = 0usize;
+    for c in line.chars() {
+        if c == '\t' {
+            let pad = TAB_STOP - (col % TAB_STOP);
+            out.push_str(&" ".repeat(pad));
+            col += pad;
+        } else {
+            out.push(c);
+            col += UnicodeWidthStr::width(c.to_string().as_str());
+        }
+    }
+    out
+}
+
 fn to_lines(content: Option<&[u8]>) -> Vec<String> {
     match content {
         None => Vec::new(),
         Some(bytes) => String::from_utf8_lossy(bytes)
             .lines()
-            .map(|l| l.to_string())
+            .map(expand_tabs)
             .collect(),
     }
 }
@@ -312,6 +344,22 @@ pub fn plain_rows(original: Option<&[u8]>, changed: Option<&[u8]>) -> Vec<Aligne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_tabs_pads_to_tab_stop() {
+        assert_eq!(expand_tabs("\tfoo"), "        foo");
+        assert_eq!(expand_tabs("\t\tfoo"), "                foo");
+        assert_eq!(expand_tabs("a\tb"), "a       b");
+        assert_eq!(expand_tabs("no tabs"), "no tabs");
+        assert_eq!(expand_tabs(""), "");
+    }
+
+    #[test]
+    fn expand_tabs_keeps_line_count() {
+        let lines = to_lines(Some(b"\tfoo\n\t\tbar\n"));
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| !l.contains('\t')));
+    }
 
     #[test]
     fn equal_lines_align_both_sides() {

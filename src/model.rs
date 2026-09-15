@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Status {
     Modified,
     Added,
@@ -21,7 +21,7 @@ impl Status {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ComparisonMode {
     WorkingVsHead,
     StagedVsHead,
@@ -40,7 +40,7 @@ impl ComparisonMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ChangedFile {
     pub status: Status,
     pub path: String,
@@ -62,6 +62,8 @@ pub struct CommitEntry {
     pub title: String,
     pub date: String,
     pub author: String,
+    /// Ref decoration from `git log %D` (branch/tag names), `HEAD -> ` removed.
+    pub refs: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

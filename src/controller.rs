@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -19,7 +19,13 @@ pub enum Focus {
 }
 
 pub enum Overlay {
-    CommitPicker { commits: Vec<CommitEntry>, cursor: usize },
+    CommitPicker {
+        commits: Vec<CommitEntry>,
+        cursor: usize,
+        /// Scroll offset of the preview pane showing the selected commit's
+        /// full message (PageUp/PageDown).
+        preview_scroll: usize,
+    },
     Help,
 }
 
@@ -79,6 +85,8 @@ pub struct Controller<'a> {
     pub facade: GitFacade<'a>,
     pub repo_path: PathBuf,
     pub has_commits: bool,
+    /// Current git branch (e.g. `main`), or `None` on a detached HEAD.
+    pub branch: Option<String>,
     pub mode: ComparisonMode,
     pub selected_commit: Option<String>,
     mode_state: [ModeState; 4],
@@ -106,6 +114,15 @@ pub struct Controller<'a> {
     /// Sibling ordering for the file list.
     pub sort: SortMode,
     pub overlay: Option<Overlay>,
+    /// Full commit messages fetched for the commit picker preview, keyed by
+    /// short hash, so moving through the list doesn't re-run git.
+    pub commit_messages: HashMap<String, String>,
+    /// Visible rows of the commit-picker preview pane, used as the PgUp/PgDn
+    /// scroll step. Set by the renderer each frame the picker is open.
+    pub commit_preview_viewport: usize,
+    /// Largest valid preview scroll offset (content rows minus viewport), set
+    /// by the renderer so PgDn can't scroll past the end.
+    pub commit_preview_max_scroll: usize,
     pub focus: Focus,
     pub diff_viewport: usize,
     pub diff_hviewport: usize,
@@ -126,6 +143,7 @@ impl<'a> Controller<'a> {
             facade,
             repo_path,
             has_commits,
+            branch: None,
             mode: if initial_commit.is_some() {
                 ComparisonMode::CommitVsHead
             } else {
@@ -152,6 +170,9 @@ impl<'a> Controller<'a> {
             ignore_whitespace: false,
             sort: SortMode::Path,
             overlay: None,
+            commit_messages: HashMap::new(),
+            commit_preview_viewport: 0,
+            commit_preview_max_scroll: 0,
             focus: Focus::FileList,
             diff_viewport: 0,
             diff_hviewport: 0,
@@ -163,6 +184,7 @@ impl<'a> Controller<'a> {
         if let Some(c) = &ctrl.selected_commit {
             ctrl.mode_state[ctrl.mode_index(ComparisonMode::CommitVsHead)].selected_commit = Some(c.clone());
         }
+        ctrl.branch = ctrl.facade.current_branch().ok().flatten();
         ctrl.reload(false)?;
         Ok(ctrl)
     }
@@ -288,16 +310,19 @@ impl<'a> Controller<'a> {
                 (KeyCode::Char(c), KeyModifiers::NONE) => {
                     self.filter.as_mut().unwrap().push(c);
                     self.cursor = 0;
+                    self.load_diff();
                     return;
                 }
                 (KeyCode::Backspace, _) => {
                     self.filter.as_mut().unwrap().pop();
                     self.cursor = 0;
+                    self.load_diff();
                     return;
                 }
                 (KeyCode::Esc, _) => {
                     self.filter = None;
                     self.cursor = 0;
+                    self.load_diff();
                     return;
                 }
                 (KeyCode::Enter, _) => {
@@ -459,18 +484,30 @@ impl<'a> Controller<'a> {
     }
 
     fn handle_overlay_key(&mut self, key: KeyEvent) {
+        let page = self.commit_preview_viewport.max(1);
+        let max_scroll = self.commit_preview_max_scroll;
         let action = match &mut self.overlay {
-            Some(Overlay::CommitPicker { commits, cursor }) => match key.code {
+            Some(Overlay::CommitPicker { commits, cursor, preview_scroll }) => match key.code {
                 KeyCode::Up => {
                     if *cursor > 0 {
                         *cursor -= 1;
+                        *preview_scroll = 0;
                     }
                     None
                 }
                 KeyCode::Down => {
                     if *cursor + 1 < commits.len() {
                         *cursor += 1;
+                        *preview_scroll = 0;
                     }
+                    None
+                }
+                KeyCode::PageUp => {
+                    *preview_scroll = preview_scroll.saturating_sub(page);
+                    None
+                }
+                KeyCode::PageDown => {
+                    *preview_scroll = preview_scroll.saturating_add(page).min(max_scroll);
                     None
                 }
                 KeyCode::Enter => Some(commits.get(*cursor).cloned()),
@@ -480,6 +517,9 @@ impl<'a> Controller<'a> {
             Some(Overlay::Help) => None,
             None => None,
         };
+        // the preview pane shows the selected commit's full message; fetch and
+        // cache it once per commit so navigating the list stays snappy
+        self.fetch_commit_preview();
         if let Some(selected) = action.flatten() {
             // save the mode we're leaving so switching back restores it
             self.save_mode_state();
@@ -493,6 +533,23 @@ impl<'a> Controller<'a> {
             let _ = self.reload(false);
         } else if matches!(key.code, KeyCode::Esc) || key.code == KeyCode::Char('?') {
             self.overlay = None;
+        }
+    }
+
+    /// Fetch and cache the full message of the commit under the picker cursor,
+    /// so the preview pane always has something to show.
+    fn fetch_commit_preview(&mut self) {
+        if let Some(Overlay::CommitPicker { commits, cursor, .. }) = &self.overlay {
+            let entry = commits.get(*cursor).cloned();
+            if let Some(entry) = entry
+                && !self.commit_messages.contains_key(&entry.short_hash)
+            {
+                let msg = self
+                    .facade
+                    .commit_message(&entry.short_hash)
+                    .unwrap_or_default();
+                self.commit_messages.insert(entry.short_hash, msg);
+            }
         }
     }
 
@@ -511,7 +568,12 @@ impl<'a> Controller<'a> {
         } else if self.has_commits {
             match self.facade.commits() {
                 Ok(commits) => {
-                    self.overlay = Some(Overlay::CommitPicker { commits, cursor: 0 });
+                    self.overlay = Some(Overlay::CommitPicker {
+                        commits,
+                        cursor: 0,
+                        preview_scroll: 0,
+                    });
+                    self.fetch_commit_preview();
                 }
                 Err(e) => self.status = format!("加载 commit 失败: {}", e),
             }
@@ -657,6 +719,10 @@ impl<'a> Controller<'a> {
             SortMode::Status => "排序: 状态".into(),
             SortMode::Added => "排序: 增行数".into(),
         };
+        // sorting reorders the list, so the row under the cursor may be a
+        // different file — reload the diff to match the new selection instead
+        // of leaving the previous file's content on the panel
+        self.load_diff();
     }
 
     /// Rebuild the cached tree from the current files, wrapped under a root

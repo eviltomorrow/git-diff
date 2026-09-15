@@ -41,6 +41,24 @@ fn parse_numstat_rename() {
 }
 
 #[test]
+fn parse_numstat_dir_rename_with_braces() {
+    // git abbreviates a rename that crosses directories as `{old => new}/file`
+    let out = "1\t1\t{cmd/util => pkg/wireshark}/wireshark.go\n";
+    let rows = parse_numstat(out, true).unwrap();
+    assert_eq!(rows[0].path, "pkg/wireshark/wireshark.go");
+    assert_eq!(rows[0].old_path.as_deref(), Some("cmd/util/wireshark.go"));
+}
+
+#[test]
+fn parse_numstat_file_rename_with_braces() {
+    // rename inside a directory keeps the shared prefix: `dir/{old => new}`
+    let out = "190\t276\tcmd/gobgp-ctl/cmd/{list_path.go => route_list.go}\n";
+    let rows = parse_numstat(out, true).unwrap();
+    assert_eq!(rows[0].path, "cmd/gobgp-ctl/cmd/route_list.go");
+    assert_eq!(rows[0].old_path.as_deref(), Some("cmd/gobgp-ctl/cmd/list_path.go"));
+}
+
+#[test]
 fn parse_numstat_binary() {
     let out = "-\t-\tbinary.png\n";
     let rows = parse_numstat(out, false).unwrap();
@@ -69,13 +87,22 @@ fn parse_name_status_rename() {
 
 #[test]
 fn parse_log_format() {
-    let out = "a1b2c3d|Add refund logic|2026-09-10|Alice\nf4e5d6c|Fix login crash|2026-09-05|Bob\n";
+    let out = "a1b2c3d|Add refund logic|2026-09-10|Alice|main\nf4e5d6c|Fix login crash|2026-09-05|Bob\n";
     let commits = parse_log(out).unwrap();
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[0].short_hash, "a1b2c3d");
     assert_eq!(commits[0].title, "Add refund logic");
     assert_eq!(commits[0].date, "2026-09-10");
     assert_eq!(commits[0].author, "Alice");
+    assert_eq!(commits[0].refs, "main");
+    // missing refs field stays empty
+    assert_eq!(commits[1].refs, "");
+}
+
+#[test]
+fn parse_log_strips_head_decoration() {
+    let commits = parse_log("a1b2c3d|Title|2026-09-10|Alice|HEAD -> main, tag: v1.0\n").unwrap();
+    assert_eq!(commits[0].refs, "main, tag: v1.0");
 }
 
 #[test]

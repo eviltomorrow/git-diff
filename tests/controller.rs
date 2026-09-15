@@ -18,7 +18,7 @@ impl GitRunner for FakeRunner {
             ["diff", "--numstat", "-M"] => Ok(String::new()),
             ["diff", "--name-status", "-M"] => Ok(String::new()),
             ["ls-files", "--others", "--exclude-standard"] => Ok(String::new()),
-            ["log", "-n", "200", "--pretty=format:%h|%s|%ad|%an", "--date=short"] => Ok("abc1234|Add feature|2026-01-01|Alice\n".into()),
+            ["log", "-n", "200", "--pretty=format:%h|%s|%ad|%an|%D", "--date=short"] => Ok("abc1234|Add feature|2026-01-01|Alice|main\n".into()),
             ["show", "HEAD:main.rs"] => Ok("line1\nline2\nline3\n".into()),
             ["show", "HEAD:lib.rs"] => Ok("x\ny\n".into()),
             _ => Ok(String::new()),
@@ -150,6 +150,50 @@ fn mode_d_opens_picker_then_loads_commit() {
 }
 
 #[test]
+fn commit_picker_pages_preview_and_clamps() {
+    struct TwoCommitRunner;
+    impl GitRunner for TwoCommitRunner {
+        fn run(&self, args: &[&str]) -> anyhow::Result<String> {
+            match args {
+                ["diff", "--numstat", "-M", "HEAD"] => Ok("1\t0\tmain.rs\n".into()),
+                ["diff", "--name-status", "-M", "HEAD"] => Ok("M\tmain.rs\n".into()),
+                ["log", "-n", "200", "--pretty=format:%h|%s|%ad|%an|%D", "--date=short"] => {
+                    Ok("aaa1111|First|2026-01-01|Alice|main\nbbb2222|Second|2026-01-02|Bob\n".into())
+                }
+                _ => Ok(String::new()),
+            }
+        }
+    }
+    let facade = GitFacade::new(&TwoCommitRunner, &PathBuf::from("/tmp"));
+    let mut ctrl = Controller::new(facade, PathBuf::from("/tmp"), true, None).unwrap();
+    // the renderer reports a 5-row preview viewport with 12 rows of content,
+    // so the largest valid scroll offset is 7
+    ctrl.commit_preview_viewport = 5;
+    ctrl.commit_preview_max_scroll = 7;
+    ctrl.handle_key(key(KeyCode::Char('4')));
+    let scroll = |c: &Controller<'_>| match &c.overlay {
+        Some(Overlay::CommitPicker { preview_scroll, .. }) => *preview_scroll,
+        _ => panic!("picker not open"),
+    };
+    assert_eq!(scroll(&ctrl), 0);
+    // PgDn scrolls a full page, and stops at the content end
+    ctrl.handle_key(key(KeyCode::PageDown));
+    assert_eq!(scroll(&ctrl), 5);
+    ctrl.handle_key(key(KeyCode::PageDown));
+    assert_eq!(scroll(&ctrl), 7, "clamped to max scroll");
+    // one PgUp from the bottom returns a full page (no unwinding needed)
+    ctrl.handle_key(key(KeyCode::PageUp));
+    assert_eq!(scroll(&ctrl), 2);
+    ctrl.handle_key(key(KeyCode::PageUp));
+    assert_eq!(scroll(&ctrl), 0);
+    // moving the selection resets the preview scroll
+    ctrl.handle_key(key(KeyCode::PageDown));
+    assert_eq!(scroll(&ctrl), 5);
+    ctrl.handle_key(key(KeyCode::Down));
+    assert_eq!(scroll(&ctrl), 0);
+}
+
+#[test]
 fn filter_negation_excludes_matches() {
     let mut ctrl = setup();
     ctrl.handle_key(key(KeyCode::Char('/')));
@@ -176,6 +220,48 @@ fn sort_cycles_through_modes() {
     assert_eq!(ctrl.sort, SortMode::Added);
     ctrl.handle_key(key(KeyCode::Char('s')));
     assert_eq!(ctrl.sort, SortMode::Path);
+}
+
+#[test]
+fn sorting_reloads_the_diff_for_the_newly_selected_file() {
+    let mut ctrl = setup();
+    // path sort keeps lib.rs (alphabetically first) on row 1
+    ctrl.handle_key(key(KeyCode::Down));
+    assert_eq!(ctrl.diff_file.as_ref().unwrap().path, "lib.rs");
+    // two `s`: path -> status -> added; main.rs (2 added) now sorts before
+    // lib.rs (1 added), so the row under the cursor becomes main.rs
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    ctrl.handle_key(key(KeyCode::Char('s')));
+    assert_eq!(ctrl.sort, git_diff::tree::SortMode::Added);
+    match &ctrl.visible_rows()[ctrl.cursor] {
+        git_diff::tree::VisibleRow::File { file, .. } => assert_eq!(file.path, "main.rs"),
+        _ => panic!("expected a file row"),
+    }
+    assert_eq!(
+        ctrl.diff_file.as_ref().map(|f| f.path.as_str()),
+        Some("main.rs"),
+        "diff panel must follow the newly selected file, not stay on lib.rs"
+    );
+}
+
+#[test]
+fn cancelling_filter_resets_diff_to_selection() {
+    let mut ctrl = setup();
+    ctrl.handle_key(key(KeyCode::Down)); // -> lib.rs
+    assert_eq!(ctrl.diff_file.as_ref().unwrap().path, "lib.rs");
+    // start filtering then cancel: cursor returns to row 0 (the root dir) and
+    // the diff panel must not keep showing lib.rs
+    ctrl.handle_key(key(KeyCode::Char('/')));
+    for ch in ['l', 'i', 'b'] {
+        ctrl.handle_key(key(KeyCode::Char(ch)));
+    }
+    ctrl.handle_key(key(KeyCode::Esc));
+    assert!(ctrl.filter.is_none());
+    assert_eq!(ctrl.cursor, 0);
+    assert!(
+        ctrl.diff_file.is_none(),
+        "diff must clear when the selection leaves the file"
+    );
 }
 
 #[test]

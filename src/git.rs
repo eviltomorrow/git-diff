@@ -28,10 +28,29 @@ impl GitRunner for SystemRunner {
             .context("failed to run git")?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(anyhow!("git {:?} failed: {}", args, stderr.trim()));
+            return Err(anyhow!("{}", clean_git_error(&stderr)));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
+
+/// Turns git's stderr into a short, friendly message for the status bar:
+/// takes the first non-empty line and strips git's own error prefix
+/// (`fatal: `, `error: `, and their localized forms), so e.g.
+/// `fatal: 有歧义的参数 'd1d413e'` shows as `有歧义的参数 'd1d413e'`.
+fn clean_git_error(stderr: &str) -> &str {
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    const PREFIXES: [&str; 4] = ["fatal: ", "error: ", "致命错误：", "错误："];
+    for prefix in PREFIXES {
+        if let Some(rest) = first.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    first
 }
 
 pub struct GitFacade<'a> {
@@ -59,6 +78,37 @@ pub struct StatusRow {
     pub old_path: Option<String>,
 }
 
+/// Expands one side of git's brace-abbreviated rename path back to the real
+/// path. With rename detection, `git diff --numstat` shortens the common
+/// prefix/suffix of a rename with braces, e.g. `{a/b => c/d}/e` (directory
+/// rename) or `a/{b => c}` (file rename inside a directory). `new` selects the
+/// side after the `=>`; the other side keeps the text before it. Braces that
+/// do not enclose a ` => ` are kept literally.
+fn rename_side(path: &str, new: bool) -> String {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let arrow = after.find(" => ");
+        let close = after.find('}');
+        if let Some(arrow) = arrow
+            && close.is_some_and(|c| arrow < c)
+        {
+            let close = arrow + 4 + after[arrow + 4..].find('}').expect("close inside braces");
+            let a = &after[..arrow];
+            let b = &after[arrow + 4..close];
+            out.push_str(if new { b } else { a });
+            rest = &after[close + 1..];
+        } else {
+            out.push('{');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn parse_numstat(out: &str, with_rename: bool) -> anyhow::Result<Vec<NumstatRow>> {
     let mut rows = Vec::new();
     for line in out.lines() {
@@ -80,9 +130,11 @@ pub fn parse_numstat(out: &str, with_rename: bool) -> anyhow::Result<Vec<Numstat
         };
         let (new_path, old_path) = if with_rename {
             if let Some(idx) = path.find(" => ") {
-                let old = path[..idx].to_string();
-                let new = path[idx + 4..].to_string();
-                (new, Some(old))
+                if path.contains('{') {
+                    (rename_side(path, true), Some(rename_side(path, false)))
+                } else {
+                    (path[idx + 4..].to_string(), Some(path[..idx].to_string()))
+                }
             } else {
                 (path.to_string(), None)
             }
@@ -137,16 +189,27 @@ pub fn parse_name_status(out: &str) -> anyhow::Result<Vec<StatusRow>> {
 pub fn parse_log(out: &str) -> anyhow::Result<Vec<CommitEntry>> {
     let mut commits = Vec::new();
     for line in out.lines() {
-        let mut it = line.splitn(4, '|');
+        let mut it = line.splitn(5, '|');
         let short_hash = it.next().unwrap_or("").to_string();
         let title = it.next().unwrap_or("").to_string();
         let date = it.next().unwrap_or("").to_string();
         let author = it.next().unwrap_or("").to_string();
+        // `%D` decorates the current branch with a leading `HEAD -> `; strip it
+        // so the row shows just `main`, `origin/…`, `tag: v1.0`, ...
+        let refs = it
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches("HEAD -> ")
+            .trim_start_matches("HEAD, ")
+            .trim()
+            .to_string();
         commits.push(CommitEntry {
             short_hash,
             title,
             date,
             author,
+            refs,
         });
     }
     Ok(commits)
@@ -249,10 +312,28 @@ impl<'a> GitFacade<'a> {
             "log",
             "-n",
             "200",
-            "--pretty=format:%h|%s|%ad|%an",
+            "--pretty=format:%h|%s|%ad|%an|%D",
             "--date=short",
         ])?;
         parse_log(&out)
+    }
+
+    /// The full commit message (subject + body) for the given commit, used to
+    /// render the commit-picker preview pane.
+    pub fn commit_message(&self, commit: &str) -> anyhow::Result<String> {
+        let out = self.run(&["log", "-1", "--format=%B", commit])?;
+        Ok(out.trim_end().to_string())
+    }
+
+    /// The current branch name (e.g. `main`), or `None` on a detached HEAD.
+    pub fn current_branch(&self) -> anyhow::Result<Option<String>> {
+        match self.run(&["symbolic-ref", "--short", "HEAD"]) {
+            Ok(out) => {
+                let name = out.trim();
+                Ok(if name.is_empty() { None } else { Some(name.to_string()) })
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     fn fetch_ref(&self, rev: &str, path: &str) -> anyhow::Result<Option<Vec<u8>>> {

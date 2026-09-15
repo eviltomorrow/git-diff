@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -1315,13 +1316,22 @@ pub fn run<R: GitRunner>(
     terminal.hide_cursor()?;
 
     let result = (|| {
-        execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        // Enable mouse reporting for clicks only (`?1000h`, SGR `?1006h`).
+        // crossterm's EnableMouseCapture also turns on button-motion and
+        // any-motion tracking, which makes the terminal swallow every mouse
+        // event and disables its native drag-selection, so nothing can be
+        // selected/copied with the mouse. Click-only still gives the app the
+        // click events it uses for panel focus, while terminals keep native
+        // selection (Shift + drag) available.
+        write!(std::io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
+        std::io::stdout().flush()?;
         event_loop(&mut terminal, &mut app)
     })();
 
     // restore terminal to its original state: leave raw mode and the alternate
     // screen so the shell prompt renders normally after quitting
-    let _ = execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = write!(std::io::stdout(), "\x1b[?1000l\x1b[?1006l");
+    let _ = std::io::stdout().flush();
     disable_raw_mode()?;
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
     result

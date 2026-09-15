@@ -28,10 +28,29 @@ impl GitRunner for SystemRunner {
             .context("failed to run git")?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(anyhow!("git {:?} failed: {}", args, stderr.trim()));
+            return Err(anyhow!("{}", clean_git_error(&stderr)));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
+
+/// Turns git's stderr into a short, friendly message for the status bar:
+/// takes the first non-empty line and strips git's own error prefix
+/// (`fatal: `, `error: `, and their localized forms), so e.g.
+/// `fatal: 有歧义的参数 'd1d413e'` shows as `有歧义的参数 'd1d413e'`.
+fn clean_git_error(stderr: &str) -> &str {
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    const PREFIXES: [&str; 4] = ["fatal: ", "error: ", "致命错误：", "错误："];
+    for prefix in PREFIXES {
+        if let Some(rest) = first.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    first
 }
 
 pub struct GitFacade<'a> {

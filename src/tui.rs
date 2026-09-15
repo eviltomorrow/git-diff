@@ -276,8 +276,18 @@ impl<'a> App<'a> {
         render_statusbar(f, chunks[2], &self.ctrl);
 
         match &self.ctrl.overlay {
-            Some(Overlay::CommitPicker { commits, cursor }) => {
-                render_commit_picker(f, area, commits, *cursor);
+            Some(Overlay::CommitPicker { commits, cursor, preview_scroll }) => {
+                let preview = self
+                    .ctrl
+                    .commit_messages
+                    .get(&commits[*cursor].short_hash)
+                    .map(String::as_str);
+                // preview rows = panel inner height minus header + hint lines,
+                // used as the PgUp/PgDn scroll page
+                let panel_h = commit_picker_height(commits.len(), area.height);
+                self.ctrl.commit_preview_viewport = panel_h.saturating_sub(5) as usize;
+                let max_scroll = render_commit_picker(f, area, commits, *cursor, preview, *preview_scroll);
+                self.ctrl.commit_preview_max_scroll = max_scroll;
             }
             Some(Overlay::Help) => render_help(f, area),
             None => {}
@@ -990,23 +1000,59 @@ fn clear_area(f: &mut Frame, area: Rect) {
     f.render_widget(Clear, area);
 }
 
-fn render_commit_picker(f: &mut Frame, area: Rect, commits: &[CommitEntry], cursor: usize) {
+/// Widest the author / refs columns may grow before truncation.
+const MAX_AUTHOR_W: usize = 24;
+const MAX_REFS_W: usize = 16;
+
+/// Height of the commit picker panel for a given commit count / screen height.
+/// The renderer and the controller both need it (the latter for the preview's
+/// PgUp/PgDn page size), so it lives in one place.
+fn commit_picker_height(commits_len: usize, area_height: u16) -> u16 {
     const MAX_ROWS: usize = 20;
+    ((commits_len.min(MAX_ROWS) as u16) + 5)
+        .min(area_height.saturating_sub(4))
+        .max(7)
+}
+
+fn render_commit_picker(
+    f: &mut Frame,
+    area: Rect,
+    commits: &[CommitEntry],
+    cursor: usize,
+    preview: Option<&str>,
+    preview_scroll: usize,
+) -> usize {
     const SCROLL_W: usize = 2;
     const MARKER_W: usize = 2;
     const HASH_W: usize = 9;
-    const DATE_W: usize = 18;
+    const DATE_W: usize = 11;
+    const GAP: usize = 1;
+    const MIN_PREVIEW_W: usize = 28;
+
     let max_text = commits
         .iter()
         .map(|c| UnicodeWidthStr::width(c.title.as_str()))
         .max()
         .unwrap_or(0);
-    let width = ((max_text + MARKER_W + HASH_W + DATE_W + SCROLL_W) as u16)
+    let max_author = commits
+        .iter()
+        .map(|c| UnicodeWidthStr::width(c.author.as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_AUTHOR_W);
+    let max_refs = commits
+        .iter()
+        .map(|c| UnicodeWidthStr::width(c.refs.as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_REFS_W);
+
+    // list columns plus a right-hand preview pane
+    let list_w = MARKER_W + HASH_W + DATE_W + max_author + max_refs + SCROLL_W + max_text;
+    let width = ((list_w + GAP + MIN_PREVIEW_W + 2) as u16)
         .min(area.width.saturating_sub(4))
-        .max(40);
-    let height = ((commits.len().min(MAX_ROWS) as u16) + 5)
-        .min(area.height.saturating_sub(4))
-        .max(7);
+        .max(60);
+    let height = commit_picker_height(commits.len(), area.height);
     let x = area.x + area.width.saturating_div(2) - width.saturating_div(2);
     let y = area.y + area.height.saturating_div(2) - height.saturating_div(2);
     let panel = Rect { x, y, width, height };
@@ -1023,14 +1069,77 @@ fn render_commit_picker(f: &mut Frame, area: Rect, commits: &[CommitEntry], curs
             Paragraph::new(Line::from(Span::styled("(no commits)", Style::default().fg(styles::DIM)))),
             Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
         );
-        return;
+        return 0;
     }
-    let visible = (inner.height.saturating_sub(3)) as usize;
+
+    // split the inner area: commit list on the left, message preview on the right
+    let inner_w = inner.width as usize;
+    let preview_w = (inner_w / 3)
+        .clamp(MIN_PREVIEW_W, 64)
+        .min(inner_w.saturating_sub(50));
+    let left_w = inner_w.saturating_sub(preview_w + GAP);
+    let list_rect = Rect { x: inner.x, y: inner.y, width: left_w as u16, height: inner.height };
+    render_commit_list(f, list_rect, commits, cursor);
+
+    // vertical separator between the two panes
+    let sep_x = inner.x + left_w as u16;
+    for i in 0..inner.height {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("│", Style::default().fg(styles::DIM)))),
+            Rect { x: sep_x, y: inner.y + i, width: 1, height: 1 },
+        );
+    }
+
+    let preview_rect = Rect {
+        x: inner.x + left_w as u16 + GAP as u16,
+        y: inner.y,
+        width: preview_w as u16,
+        height: inner.height,
+    };
+    let max_scroll = render_commit_preview(f, preview_rect, commits, cursor, preview, preview_scroll);
+
+    let hint = "↑↓ 选择  PgUp/PgDn 预览  Enter 确认  Esc 关闭";
+    let hint_w = UnicodeWidthStr::width(hint);
+    let pad = inner.width.saturating_sub(hint_w as u16 + 1);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{}{}", " ".repeat(pad as usize), hint),
+            Style::default().fg(styles::DIM),
+        ))),
+        Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(2), width: inner.width, height: 1 },
+    );
+    max_scroll
+}
+
+/// The commit list pane: marker, hash, title, refs, date and author columns.
+/// The author gets its own column sized to the longest name so it is never
+/// crammed into the date's width and truncated.
+fn render_commit_list(f: &mut Frame, rect: Rect, commits: &[CommitEntry], cursor: usize) {
+    const SCROLL_W: usize = 2;
+    const MARKER_W: usize = 2;
+    const HASH_W: usize = 9;
+    const DATE_W: usize = 11;
+
+    let max_author = commits
+        .iter()
+        .map(|c| UnicodeWidthStr::width(c.author.as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_AUTHOR_W);
+    let max_refs = commits
+        .iter()
+        .map(|c| UnicodeWidthStr::width(c.refs.as_str()))
+        .max()
+        .unwrap_or(0)
+        .min(MAX_REFS_W);
+
+    let fixed = MARKER_W + HASH_W + DATE_W + max_author + max_refs + SCROLL_W;
+    let title_w = (rect.width as usize).saturating_sub(fixed + 1);
+
+    let visible = (rect.height.saturating_sub(3)) as usize;
     let max_start = commits.len().saturating_sub(visible);
     let start = cursor.saturating_sub(visible.saturating_sub(1)).min(max_start);
-    let has_scroll = commits.len() > visible;
-    let content_w = inner.width.saturating_sub(2) as usize;
-    let title_w = content_w.saturating_sub(MARKER_W + HASH_W + DATE_W + SCROLL_W);
+
     for i in 0..visible {
         let idx = start + i;
         if idx >= commits.len() {
@@ -1044,36 +1153,134 @@ fn render_commit_picker(f: &mut Frame, area: Rect, commits: &[CommitEntry], curs
             Style::default()
         };
         let marker = if selected { "▶" } else { " " };
-        let date_author = format!(" {:>12} {}", c.date, c.author);
-        let date_author = truncate(&date_author, DATE_W);
         let line = Line::from(vec![
             Span::styled(marker, style),
             Span::styled(format!(" {} ", c.short_hash), style.fg(Color::Cyan)),
             Span::styled(pad_right(&truncate(&c.title, title_w), title_w), style),
-            Span::styled(pad_right(&date_author, DATE_W), style.fg(styles::DIM)),
+            Span::styled(pad_right(&truncate(&c.refs, max_refs), max_refs), style.fg(Color::Magenta)),
+            Span::styled(pad_right(&c.date, DATE_W), style.fg(styles::DIM)),
+            Span::styled(pad_right(&truncate(&c.author, max_author), max_author), style.fg(styles::DIM)),
             Span::styled(" ".repeat(SCROLL_W), style),
         ]);
-        f.render_widget(line, Rect { x: inner.x + 1, y: inner.y + 1 + i as u16, width: inner.width.saturating_sub(2), height: 1 });
+        f.render_widget(line, Rect { x: rect.x + 1, y: rect.y + 1 + i as u16, width: rect.width.saturating_sub(2), height: 1 });
     }
-    if has_scroll {
+
+    if commits.len() > visible {
         let scroll_area = Rect {
-            x: inner.x + inner.width.saturating_sub(SCROLL_W as u16),
-            y: inner.y + 1,
+            x: rect.x + rect.width.saturating_sub(SCROLL_W as u16),
+            y: rect.y + 1,
             width: SCROLL_W as u16,
-            height: inner.height.saturating_sub(3),
+            height: rect.height.saturating_sub(3),
         };
         render_commit_scrollbar(f, scroll_area, commits.len(), visible, start);
     }
-    let hint = "↑↓ 选择   Enter 确认   Esc 关闭";
-    let hint_w = UnicodeWidthStr::width(hint);
-    let pad = inner.width.saturating_sub(hint_w as u16 + 1);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("{}{}", " ".repeat(pad as usize), hint),
-            Style::default().fg(styles::DIM),
-        ))),
-        Rect { x: inner.x, y: inner.y + inner.height.saturating_sub(2), width: inner.width, height: 1 },
-    );
+}
+
+/// The preview pane: header (hash, date, author) plus the selected commit's
+/// full message, wrapped to the pane width. The subject line is bold, the body
+/// is dim; a scrollbar appears when the message is longer than the pane.
+fn render_commit_preview(
+    f: &mut Frame,
+    rect: Rect,
+    commits: &[CommitEntry],
+    cursor: usize,
+    preview: Option<&str>,
+    preview_scroll: usize,
+) -> usize {
+    let c = &commits[cursor];
+    let width = rect.width.saturating_sub(2) as usize;
+    let header = Line::from(vec![
+        Span::styled(format!(" {} ", c.short_hash), Style::default().fg(Color::Cyan)),
+        Span::styled(format!(" {}  {}", c.date, c.author), Style::default().fg(styles::DIM)),
+    ]);
+    f.render_widget(header, Rect { x: rect.x + 1, y: rect.y, width: rect.width.saturating_sub(2), height: 1 });
+
+    let Some(msg) = preview else {
+        f.render_widget(
+            Line::from(Span::styled(" 加载中…", Style::default().fg(styles::DIM))),
+            Rect { x: rect.x + 1, y: rect.y + 1, width: width as u16, height: 1 },
+        );
+        return 0;
+    };
+
+    // wrap the full message; the subject (first line) stays bold
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for (i, line) in msg.lines().enumerate() {
+        for w in wrap_line(line, width.saturating_sub(2)) {
+            rows.push((w, i == 0));
+        }
+    }
+    // rows below the header, above the shared hint line
+    let avail = (rect.height.saturating_sub(3)) as usize;
+    let max_scroll = rows.len().saturating_sub(avail);
+    let start = preview_scroll.min(max_scroll);
+    for (i, (text, is_subject)) in rows.iter().enumerate().skip(start).take(avail) {
+        let style = if *is_subject {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(styles::DIM)
+        };
+        f.render_widget(
+            Line::from(Span::styled(text.as_str(), style)),
+            Rect { x: rect.x + 1, y: rect.y + 1 + (i - start) as u16, width: width as u16, height: 1 },
+        );
+    }
+    if rows.len() > avail {
+        let sb = Rect {
+            x: rect.x + rect.width.saturating_sub(1),
+            y: rect.y + 1,
+            width: 1,
+            height: rect.height.saturating_sub(3),
+        };
+        render_commit_preview_scrollbar(f, sb, rows.len(), avail, start);
+    }
+    max_scroll
+}
+
+fn render_commit_preview_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
+    let h = area.height as usize;
+    let pos = if total <= visible {
+        0.0
+    } else {
+        (start as f64) / (total - visible) as f64
+    };
+    let size = (visible as f64 / total as f64 * h as f64).max(1.0);
+    let track_start = (pos * (h as f64 - size)).round() as usize;
+    for i in 0..h {
+        let ch = if (i as f64) >= track_start as f64 && (i as f64) < track_start as f64 + size {
+            "█"
+        } else {
+            "░"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(ch, Style::default().fg(styles::DIM)))),
+            Rect { x: area.x, y: area.y + i as u16, width: 1, height: 1 },
+        );
+    }
+}
+
+/// Char-level wrap of a single line to a display width, keeping wide (CJK)
+/// glyphs intact.
+fn wrap_line(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthStr::width(c.to_string().as_str());
+        if cur_w > 0 && cur_w + cw > width {
+            out.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(c);
+        cur_w += cw;
+    }
+    if cur_w > 0 {
+        out.push(cur);
+    }
+    out
 }
 
 fn render_commit_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
@@ -1225,9 +1432,10 @@ fn overlay_key(c: &Controller<'_>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     match &c.overlay {
         Some(Overlay::Help) => 0u8.hash(&mut h),
-        Some(Overlay::CommitPicker { commits, cursor }) => {
+        Some(Overlay::CommitPicker { commits, cursor, preview_scroll }) => {
             1u8.hash(&mut h);
             cursor.hash(&mut h);
+            preview_scroll.hash(&mut h);
             for e in commits {
                 e.short_hash.hash(&mut h);
                 e.title.hash(&mut h);

@@ -189,16 +189,27 @@ pub fn parse_name_status(out: &str) -> anyhow::Result<Vec<StatusRow>> {
 pub fn parse_log(out: &str) -> anyhow::Result<Vec<CommitEntry>> {
     let mut commits = Vec::new();
     for line in out.lines() {
-        let mut it = line.splitn(4, '|');
+        let mut it = line.splitn(5, '|');
         let short_hash = it.next().unwrap_or("").to_string();
         let title = it.next().unwrap_or("").to_string();
         let date = it.next().unwrap_or("").to_string();
         let author = it.next().unwrap_or("").to_string();
+        // `%D` decorates the current branch with a leading `HEAD -> `; strip it
+        // so the row shows just `main`, `origin/…`, `tag: v1.0`, ...
+        let refs = it
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches("HEAD -> ")
+            .trim_start_matches("HEAD, ")
+            .trim()
+            .to_string();
         commits.push(CommitEntry {
             short_hash,
             title,
             date,
             author,
+            refs,
         });
     }
     Ok(commits)
@@ -301,10 +312,17 @@ impl<'a> GitFacade<'a> {
             "log",
             "-n",
             "200",
-            "--pretty=format:%h|%s|%ad|%an",
+            "--pretty=format:%h|%s|%ad|%an|%D",
             "--date=short",
         ])?;
         parse_log(&out)
+    }
+
+    /// The full commit message (subject + body) for the given commit, used to
+    /// render the commit-picker preview pane.
+    pub fn commit_message(&self, commit: &str) -> anyhow::Result<String> {
+        let out = self.run(&["log", "-1", "--format=%B", commit])?;
+        Ok(out.trim_end().to_string())
     }
 
     /// The current branch name (e.g. `main`), or `None` on a detached HEAD.

@@ -18,7 +18,7 @@ impl GitRunner for FakeRunner {
             ["diff", "--numstat", "-M"] => Ok(String::new()),
             ["diff", "--name-status", "-M"] => Ok(String::new()),
             ["ls-files", "--others", "--exclude-standard"] => Ok(String::new()),
-            ["log", "-n", "200", "--pretty=format:%h|%s|%ad|%an", "--date=short"] => Ok("abc1234|Add feature|2026-01-01|Alice\n".into()),
+            ["log", "-n", "200", "--pretty=format:%h|%s|%ad|%an|%D", "--date=short"] => Ok("abc1234|Add feature|2026-01-01|Alice|main\n".into()),
             ["show", "HEAD:main.rs"] => Ok("line1\nline2\nline3\n".into()),
             ["show", "HEAD:lib.rs"] => Ok("x\ny\n".into()),
             _ => Ok(String::new()),
@@ -147,6 +147,50 @@ fn mode_d_opens_picker_then_loads_commit() {
     assert_eq!(ctrl.mode, ComparisonMode::CommitVsHead);
     assert_eq!(ctrl.selected_commit.as_deref(), Some("abc1234"));
     assert!(ctrl.overlay.is_none());
+}
+
+#[test]
+fn commit_picker_pages_preview_and_clamps() {
+    struct TwoCommitRunner;
+    impl GitRunner for TwoCommitRunner {
+        fn run(&self, args: &[&str]) -> anyhow::Result<String> {
+            match args {
+                ["diff", "--numstat", "-M", "HEAD"] => Ok("1\t0\tmain.rs\n".into()),
+                ["diff", "--name-status", "-M", "HEAD"] => Ok("M\tmain.rs\n".into()),
+                ["log", "-n", "200", "--pretty=format:%h|%s|%ad|%an|%D", "--date=short"] => {
+                    Ok("aaa1111|First|2026-01-01|Alice|main\nbbb2222|Second|2026-01-02|Bob\n".into())
+                }
+                _ => Ok(String::new()),
+            }
+        }
+    }
+    let facade = GitFacade::new(&TwoCommitRunner, &PathBuf::from("/tmp"));
+    let mut ctrl = Controller::new(facade, PathBuf::from("/tmp"), true, None).unwrap();
+    // the renderer reports a 5-row preview viewport with 12 rows of content,
+    // so the largest valid scroll offset is 7
+    ctrl.commit_preview_viewport = 5;
+    ctrl.commit_preview_max_scroll = 7;
+    ctrl.handle_key(key(KeyCode::Char('4')));
+    let scroll = |c: &Controller<'_>| match &c.overlay {
+        Some(Overlay::CommitPicker { preview_scroll, .. }) => *preview_scroll,
+        _ => panic!("picker not open"),
+    };
+    assert_eq!(scroll(&ctrl), 0);
+    // PgDn scrolls a full page, and stops at the content end
+    ctrl.handle_key(key(KeyCode::PageDown));
+    assert_eq!(scroll(&ctrl), 5);
+    ctrl.handle_key(key(KeyCode::PageDown));
+    assert_eq!(scroll(&ctrl), 7, "clamped to max scroll");
+    // one PgUp from the bottom returns a full page (no unwinding needed)
+    ctrl.handle_key(key(KeyCode::PageUp));
+    assert_eq!(scroll(&ctrl), 2);
+    ctrl.handle_key(key(KeyCode::PageUp));
+    assert_eq!(scroll(&ctrl), 0);
+    // moving the selection resets the preview scroll
+    ctrl.handle_key(key(KeyCode::PageDown));
+    assert_eq!(scroll(&ctrl), 5);
+    ctrl.handle_key(key(KeyCode::Down));
+    assert_eq!(scroll(&ctrl), 0);
 }
 
 #[test]

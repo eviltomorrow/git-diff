@@ -62,6 +62,8 @@ pub struct CommitEntry {
     pub title: String,
     pub date: String,
     pub author: String,
+    /// Ref decoration from `git log %D` (branch/tag names), `HEAD -> ` removed.
+    pub refs: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

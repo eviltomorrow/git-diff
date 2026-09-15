@@ -87,13 +87,22 @@ fn parse_name_status_rename() {
 
 #[test]
 fn parse_log_format() {
-    let out = "a1b2c3d|Add refund logic|2026-09-10|Alice\nf4e5d6c|Fix login crash|2026-09-05|Bob\n";
+    let out = "a1b2c3d|Add refund logic|2026-09-10|Alice|main\nf4e5d6c|Fix login crash|2026-09-05|Bob\n";
     let commits = parse_log(out).unwrap();
     assert_eq!(commits.len(), 2);
     assert_eq!(commits[0].short_hash, "a1b2c3d");
     assert_eq!(commits[0].title, "Add refund logic");
     assert_eq!(commits[0].date, "2026-09-10");
     assert_eq!(commits[0].author, "Alice");
+    assert_eq!(commits[0].refs, "main");
+    // missing refs field stays empty
+    assert_eq!(commits[1].refs, "");
+}
+
+#[test]
+fn parse_log_strips_head_decoration() {
+    let commits = parse_log("a1b2c3d|Title|2026-09-10|Alice|HEAD -> main, tag: v1.0\n").unwrap();
+    assert_eq!(commits[0].refs, "main, tag: v1.0");
 }
 
 #[test]

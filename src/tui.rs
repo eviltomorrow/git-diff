@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -20,7 +21,24 @@ use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
 use crate::tree::{SortMode, VisibleRow};
 
-const LIST_RATIO: u16 = 26;
+/// Default share of the width given to the file list, in percent.
+const DEFAULT_LIST_PCT: u16 = 26;
+/// Default share of the diff area given to the original (left) pane.
+const DEFAULT_DIFF_PCT: u16 = 50;
+/// Clamp ranges for the two draggable dividers, so a pane can never vanish.
+const LIST_MIN_PCT: u16 = 12;
+const LIST_MAX_PCT: u16 = 60;
+const DIFF_MIN_PCT: u16 = 20;
+const DIFF_MAX_PCT: u16 = 80;
+/// Per-frame step of the file-list stat-column reveal (~150ms at 60fps).
+const STATS_REVEAL_STEP: f32 = 0.12;
+
+/// Which divider a drag is moving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragTarget {
+    ListSplit,
+    DiffSplit,
+}
 
 /// Thin shell: owns the terminal and the pure [`Controller`]; rendering is
 /// read-only over controller state (viewports are synced via
@@ -31,6 +49,30 @@ pub struct App<'a> {
     /// mouse clicks onto the focused panel.
     list_rect: Rect,
     diff_rect: Rect,
+    /// Middle band holding both panels; the file-list divider spans it.
+    panels_rect: Rect,
+    /// Absolute screen columns of the two draggable dividers, captured from
+    /// the last render so hit-testing matches what the user sees.
+    list_divider_x: u16,
+    diff_divider_x: u16,
+    list_pct: u16,
+    diff_pct: u16,
+    /// Divider under the pointer (drawn as a highlight) and the one currently
+    /// being dragged, if any.
+    hover: Option<DragTarget>,
+    drag: Option<DragTarget>,
+    /// A drag changed a pane ratio at least once; on release the screen is
+    /// cleared once if the panes contain wide glyphs (clearing on every drag
+    /// step would flicker).
+    drag_resized: bool,
+    /// Whether the file-list stat columns should be shown (`true`) or hidden
+    /// (`false`) at the current width. Kept separate from the animated
+    /// reveal so a few columns of hysteresis can damp divider jitter.
+    stats_visible: bool,
+    /// Animated reveal of the stat columns: 0.0 = hidden, 1.0 = full group.
+    stats_reveal: f32,
+    /// First render snaps the reveal to its target instead of animating in.
+    stats_initialized: bool,
     /// Set when the selected diff changed (file switch, sort, filter, mode):
     /// the next frame must be a full terminal redraw. ratatui's incremental
     /// diff never emits cells that trail a double-width (CJK) glyph, so when a
@@ -84,6 +126,17 @@ impl<'a> App<'a> {
             ctrl,
             list_rect: Rect::default(),
             diff_rect: Rect::default(),
+            panels_rect: Rect::default(),
+            list_divider_x: 0,
+            diff_divider_x: 0,
+            list_pct: DEFAULT_LIST_PCT,
+            diff_pct: DEFAULT_DIFF_PCT,
+            hover: None,
+            drag: None,
+            drag_resized: false,
+            stats_visible: false,
+            stats_reveal: 0.0,
+            stats_initialized: false,
             full_redraw: true,
         })
     }
@@ -222,17 +275,157 @@ impl<'a> App<'a> {
         &self.ctrl
     }
 
-    /// Clicking inside a panel focuses it (a Tab variant).
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            let in_list = rect_contains(self.list_rect, mouse.column, mouse.row);
-            let in_diff = rect_contains(self.diff_rect, mouse.column, mouse.row);
-            match (in_list, in_diff) {
-                (true, _) => self.ctrl.set_focus(Focus::FileList),
-                (false, true) => self.ctrl.set_focus(Focus::Diff),
-                _ => {}
+    /// Clicking inside a panel focuses it (a Tab variant); pressing on a
+    /// divider and dragging resizes the panes. Returns `true` when the event
+    /// changed visible state, so the event loop can skip redrawing on plain
+    /// pointer motion.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        // overlays own the screen; pane gestures underneath are meaningless
+        if self.ctrl.overlay.is_some() {
+            return false;
+        }
+
+        let before_hover = self.hover;
+        let before_drag = self.drag;
+        let before_focus = self.ctrl.focus;
+        let before_list = self.list_pct;
+        let before_diff = self.diff_pct;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // a missed button-up (e.g. released outside the terminal)
+                // must not leave a stale drag active
+                self.drag = None;
+                self.drag_resized = false;
+                if let Some(target) = self.divider_at(mouse.column, mouse.row) {
+                    self.drag = Some(target);
+                    self.hover = Some(target);
+                } else {
+                    let in_list = rect_contains(self.list_rect, mouse.column, mouse.row);
+                    let in_diff = rect_contains(self.diff_rect, mouse.column, mouse.row);
+                    match (in_list, in_diff) {
+                        (true, _) => self.ctrl.set_focus(Focus::FileList),
+                        (false, true) => self.ctrl.set_focus(Focus::Diff),
+                        _ => {}
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(target) = self.drag {
+                    self.apply_drag(target, mouse.column);
+                    self.hover = Some(target);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.drag.take().is_some() {
+                    self.hover = self.divider_at(mouse.column, mouse.row);
+                    // One clear after the final layout settles removes any
+                    // cells left trailing double-width glyphs while dragging.
+                    if std::mem::take(&mut self.drag_resized)
+                        && (self.diff_has_wide() || self.list_has_wide())
+                    {
+                        self.full_redraw = true;
+                    }
+                }
+            }
+            MouseEventKind::Moved => {
+                self.hover = self.divider_at(mouse.column, mouse.row);
+            }
+            _ => {}
+        }
+
+        let resized = before_list != self.list_pct || before_diff != self.diff_pct;
+        if resized {
+            self.drag_resized = true;
+        }
+
+        before_hover != self.hover
+            || before_drag != self.drag
+            || before_focus != self.ctrl.focus
+            || resized
+    }
+
+    /// The divider under a screen position, widened by one column on either
+    /// side because a single-column target is hard to hit.
+    fn divider_at(&self, x: u16, y: u16) -> Option<DragTarget> {
+        if self.panels_rect.width == 0
+            || y < self.panels_rect.y
+            || y >= self.panels_rect.y.saturating_add(self.panels_rect.height)
+        {
+            return None;
+        }
+        if x.abs_diff(self.list_divider_x) <= 1 {
+            return Some(DragTarget::ListSplit);
+        }
+        if x.abs_diff(self.diff_divider_x) <= 1 {
+            return Some(DragTarget::DiffSplit);
+        }
+        None
+    }
+
+    /// Move a divider so it sits under the pointer column, clamped to the
+    /// pane's allowed share of the width.
+    fn apply_drag(&mut self, target: DragTarget, x: u16) {
+        match target {
+            DragTarget::ListSplit => {
+                self.list_pct = pct_at(x, self.panels_rect, LIST_MIN_PCT, LIST_MAX_PCT);
+            }
+            DragTarget::DiffSplit => {
+                self.diff_pct = pct_at(x, self.diff_rect, DIFF_MIN_PCT, DIFF_MAX_PCT);
             }
         }
+    }
+
+    /// Whether a full redraw was requested since the last one (without
+    /// consuming it). The event loop uses this to honour a redraw request
+    /// made by `sync_full_redraw` right after a frame.
+    pub fn full_redraw_pending(&self) -> bool {
+        self.full_redraw
+    }
+
+    /// Update the stat-column target for the current list width. A couple of
+    /// columns of hysteresis keep a divider sitting exactly on the threshold
+    /// from toggling the columns on every mouse event.
+    fn update_stats_visibility(&mut self, width: usize) {
+        const SHOW_AT: usize = ListLayout::FULL_MIN_WIDTH;
+        const HIDE_AT: usize = SHOW_AT - 2;
+        if !self.stats_initialized {
+            self.stats_visible = width >= SHOW_AT;
+            self.stats_reveal = if self.stats_visible { 1.0 } else { 0.0 };
+            self.stats_initialized = true;
+        } else if self.stats_visible {
+            if width < HIDE_AT {
+                self.stats_visible = false;
+            }
+        } else if width >= SHOW_AT {
+            self.stats_visible = true;
+        }
+    }
+
+    /// Advance the stat-column reveal animation by one frame. Returns true
+    /// when the reveal changed and a redraw is needed.
+    pub fn tick(&mut self) -> bool {
+        let target = if self.stats_visible { 1.0 } else { 0.0 };
+        if (self.stats_reveal - target).abs() < f32::EPSILON {
+            return false;
+        }
+        self.stats_reveal = if self.stats_reveal < target {
+            (self.stats_reveal + STATS_REVEAL_STEP).min(target)
+        } else {
+            (self.stats_reveal - STATS_REVEAL_STEP).max(target)
+        };
+        if (self.stats_reveal - target).abs() < f32::EPSILON && self.list_has_wide() {
+            // the name column stopped resizing; clear any cells left trailing
+            // wide glyphs during the animation
+            self.full_redraw = true;
+        }
+        true
+    }
+
+    /// Whether the reveal animation still has frames to run.
+    pub fn is_animating(&self) -> bool {
+        let target = if self.stats_visible { 1.0 } else { 0.0 };
+        (self.stats_reveal - target).abs() >= f32::EPSILON
     }
 
     pub fn render(&mut self, f: &mut Frame) {
@@ -249,11 +442,21 @@ impl<'a> App<'a> {
         // sync viewports before drawing so navigation clamps use real sizes
         let panels = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(LIST_RATIO), Constraint::Percentage(100 - LIST_RATIO)])
+            .constraints([Constraint::Percentage(self.list_pct), Constraint::Percentage(100 - self.list_pct)])
             .split(chunks[1]);
+        // the diff area is split again; both halves are passed to the renderer
+        // so the draggable divider and hit-testing share one geometry
+        let diff_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(self.diff_pct), Constraint::Percentage(100 - self.diff_pct)])
+            .split(panels[1]);
         let list_height = panels[0].height.saturating_sub(2) as usize;
         let diff_height = panels[1].height.saturating_sub(3) as usize;
-        let diff_width = (panels[1].width.saturating_div(2)).saturating_sub(10) as usize;
+        // horizontal scrolling is shared, so the narrower pane bounds it
+        let diff_width = diff_cols[0]
+            .width
+            .min(diff_cols[1].width)
+            .saturating_sub(10) as usize;
         let max_line_w = self
             .ctrl
             .diff_rows
@@ -267,13 +470,26 @@ impl<'a> App<'a> {
             .max()
             .unwrap_or(0);
         self.ctrl.update_viewports(list_height, diff_height, diff_width, max_line_w);
+        self.panels_rect = chunks[1];
         self.list_rect = panels[0];
         self.diff_rect = panels[1];
+        self.list_divider_x = panels[0].x.saturating_add(panels[0].width);
+        self.diff_divider_x = diff_cols[1].x;
+        // keep the stat-column target in sync with the list's inner width
+        self.update_stats_visibility(panels[0].width.saturating_sub(2) as usize);
+        let reveal = self.stats_reveal;
 
         render_header(f, chunks[0], &self.ctrl);
-        render_filelist(f, panels[0], &mut self.ctrl);
-        render_diffview(f, panels[1], &mut self.ctrl);
+        render_filelist(f, panels[0], &mut self.ctrl, reveal);
+        render_diffview(f, diff_cols[0], diff_cols[1], &mut self.ctrl);
         render_statusbar(f, chunks[2], &self.ctrl);
+        if let Some(target) = self.drag.or(self.hover) {
+            let (x, band) = match target {
+                DragTarget::ListSplit => (self.list_divider_x, self.panels_rect),
+                DragTarget::DiffSplit => (self.diff_divider_x, self.diff_rect),
+            };
+            render_divider_highlight(f, x, band.y, band.height, self.drag == Some(target));
+        }
 
         match &self.ctrl.overlay {
             Some(Overlay::CommitPicker { commits, cursor, preview_scroll }) => {
@@ -345,7 +561,7 @@ fn render_header(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
 
 // ------------------------------------------------------------- file list
 
-fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
+fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>, reveal: f32) {
     let is_active = ctrl.focus == Focus::FileList;
     let border_fg = if is_active { styles::ACTIVE_BORDER } else { styles::INACTIVE_BORDER };
     let block = Block::default()
@@ -367,27 +583,28 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
         return;
     }
 
-    const MARKER_W: usize = 2;
-    const STATUS_W: usize = 6;
-    const PLUS_W: usize = 4;
-    const MINUS_W: usize = 4;
-    const GAP: usize = 1;
+    let cols = ListLayout::for_width(inner.width as usize, reveal);
     let list_height = inner.height.saturating_sub(2) as usize;
-    let name_w = inner
-        .width
-        .saturating_sub((MARKER_W + STATUS_W + PLUS_W + MINUS_W + 3 * GAP) as u16) as usize;
 
-    let header = Line::from(vec![
-        Span::raw(" ".repeat(MARKER_W)),
-        Span::styled(pad_right("Name", name_w), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(pad_left("+", PLUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(pad_left("-", MINUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(pad_left("Status", STATUS_W), Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD)),
-    ]);
-    f.render_widget(header, Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
+    let header_style = Style::default().fg(styles::HEADER_FG).add_modifier(Modifier::BOLD);
+    let mut header = vec![
+        Span::raw(" ".repeat(ListLayout::MARKER_W)),
+        Span::styled(pad_right("Name", cols.name), header_style),
+        Span::raw(" ".repeat(cols.pad())),
+    ];
+    if cols.plus_cols() > 0 {
+        header.push(Span::raw(" "));
+        header.push(Span::styled(pad_left("+", ListLayout::PLUS_W), header_style));
+    }
+    if cols.minus_cols() > 0 {
+        header.push(Span::raw(" "));
+        header.push(Span::styled(pad_left("-", ListLayout::MINUS_W), header_style));
+    }
+    if cols.status_cols() > 0 {
+        header.push(Span::raw(" "));
+        header.push(Span::styled(pad_left("Status", ListLayout::STATUS_W), header_style));
+    }
+    f.render_widget(Line::from(header), Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
     f.render_widget(
         Line::from(Span::styled("─".repeat(inner.width as usize), Style::default().fg(styles::DIM))),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -409,15 +626,80 @@ fn render_filelist(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
             break;
         }
         let is_selected = idx == ctrl.cursor;
-        render_list_row(f, inner, &rows[idx], i as u16, is_selected, name_w);
+        render_list_row(f, inner, &rows[idx], i as u16, is_selected, cols);
     }
 }
 
-fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool, name_w: usize) {
-    const STATUS_W: usize = 6;
+/// Column widths for one file-list row. The stat group is revealed
+/// progressively: as the pane widens, `Status`, then `-M`, then `+N` slide in
+/// from the right, while the filename column narrows in step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListLayout {
+    name: usize,
+    /// Columns reserved at the right edge for the stat group (0..=17).
+    reserved: usize,
+}
+
+impl ListLayout {
+    const MARKER_W: usize = 2;
+    const GAP_W: usize = 1;
     const PLUS_W: usize = 4;
     const MINUS_W: usize = 4;
+    const STATUS_W: usize = 6;
+    /// Gap + "+N" + gap + "-M" + gap + "Status".
+    const RESERVED_MAX: usize = 3 * Self::GAP_W + Self::PLUS_W + Self::MINUS_W + Self::STATUS_W;
+    /// Never squeeze the filename below this, even mid-animation.
+    const MIN_NAME_W: usize = 12;
+    /// Inner width at which the whole stat group fits beside a usable name.
+    const FULL_MIN_WIDTH: usize = Self::MARKER_W + Self::RESERVED_MAX + Self::MIN_NAME_W;
 
+    fn for_width(width: usize, reveal: f32) -> Self {
+        let want = ((Self::RESERVED_MAX as f32) * reveal.clamp(0.0, 1.0)).round() as usize;
+        // mid-hide on a narrow pane, cap the reserve so the name stays readable
+        let cap = width.saturating_sub(Self::MARKER_W + Self::MIN_NAME_W);
+        let reserved = want.min(cap);
+        Self {
+            name: width.saturating_sub(Self::MARKER_W + reserved),
+            reserved,
+        }
+    }
+
+    /// Width including its leading gap, or 0 while the segment is clipped out.
+    fn status_cols(&self) -> usize {
+        if self.reserved >= Self::GAP_W + Self::STATUS_W {
+            Self::GAP_W + Self::STATUS_W
+        } else {
+            0
+        }
+    }
+
+    fn minus_cols(&self) -> usize {
+        if self.reserved >= 2 * Self::GAP_W + Self::STATUS_W + Self::MINUS_W {
+            Self::GAP_W + Self::MINUS_W
+        } else {
+            0
+        }
+    }
+
+    fn plus_cols(&self) -> usize {
+        if self.reserved >= Self::RESERVED_MAX {
+            Self::GAP_W + Self::PLUS_W
+        } else {
+            0
+        }
+    }
+
+    fn stats_width(&self) -> usize {
+        self.plus_cols() + self.minus_cols() + self.status_cols()
+    }
+
+    /// Blank columns between the name and the first visible stat segment.
+    fn pad(&self) -> usize {
+        self.reserved - self.stats_width()
+    }
+}
+
+fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_selected: bool, cols: ListLayout) {
     let selected_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
@@ -430,30 +712,54 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
         Span::raw("  ")
     };
 
+    // stat segments slide in from the right; any not-yet-revealed columns are
+    // blank padding so the filename column shrinks smoothly
+    let stat_spans = |plus: &str, minus: &str, plus_style: Style, minus_style: Style, status: &str, status_style: Style| {
+        let mut spans = vec![Span::raw(" ".repeat(cols.pad()))];
+        if cols.plus_cols() > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(pad_left(plus, ListLayout::PLUS_W), plus_style));
+        }
+        if cols.minus_cols() > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(pad_left(minus, ListLayout::MINUS_W), minus_style));
+        }
+        if cols.status_cols() > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(pad_left(status, ListLayout::STATUS_W), status_style));
+        }
+        spans
+    };
+
     let line = match row {
         VisibleRow::Dir { collapsed, path, added, deleted, guide, depth, .. } => {
             let is_root = *depth == 0;
             // the root (current directory) is display-only: no collapse arrow,
             // just the folder emoji. child dirs get the ▾/▸ collapse arrow.
             let icon = if is_root { "📁 " } else if *collapsed { "▸ " } else { "▾ " };
-            let guide_w = UnicodeWidthStr::width(guide.as_str());
-            let name_avail = name_w.saturating_sub(guide_w);
-            Line::from(vec![
+            // keep the indentation inside the name column; never let deep
+            // guides push the stats out of alignment
+            let guide = truncate(guide, cols.name);
+            let name_avail = cols.name.saturating_sub(UnicodeWidthStr::width(guide.as_str()));
+            let mut spans = vec![
                 marker,
                 // relationship lines stay thin (dim, not bold) even when
                 // the row is selected
-                Span::styled(guide.to_string(), guide_style()),
+                Span::styled(guide, guide_style()),
                 Span::styled(
                     pad_right(&truncate(&format!("{}{}", icon, short_name(path)), name_avail), name_avail),
                     row_style.fg(Color::Yellow),
                 ),
-                Span::raw(" "),
-                Span::styled(pad_left(&format!("+{}", added), PLUS_W), amount_style(*added, true, is_selected)),
-                Span::raw(" "),
-                Span::styled(pad_left(&format!("-{}", deleted), MINUS_W), amount_style(*deleted, false, is_selected)),
-                Span::raw(" "),
-                Span::styled(pad_left("", STATUS_W), row_style),
-            ])
+            ];
+            spans.extend(stat_spans(
+                &format!("+{}", added),
+                &format!("-{}", deleted),
+                amount_style(*added, true, is_selected),
+                amount_style(*deleted, false, is_selected),
+                "",
+                row_style,
+            ));
+            Line::from(spans)
         }
         VisibleRow::File { file, guide, .. } => {
             let status_style = if is_selected {
@@ -461,26 +767,26 @@ fn render_list_row(f: &mut Frame, inner: Rect, row: &VisibleRow, y: u16, is_sele
             } else {
                 Style::default().fg(styles::status_fg(file.status))
             };
-            let status = file.status.letter();
             let name = file.path.rsplit('/').next().unwrap_or(&file.path);
-            let plus = format!("+{}", file.added);
-            let minus = format!("-{}", file.deleted);
-            let guide_w = UnicodeWidthStr::width(guide.as_str());
-            let name_avail = name_w.saturating_sub(guide_w);
-            Line::from(vec![
+            let guide = truncate(guide, cols.name);
+            let name_avail = cols.name.saturating_sub(UnicodeWidthStr::width(guide.as_str()));
+            let mut spans = vec![
                 marker,
-                Span::styled(guide.to_string(), guide_style()),
+                Span::styled(guide, guide_style()),
                 Span::styled(
                     pad_right(&truncate(name, name_avail), name_avail),
                     if is_selected { row_style.fg(Color::White) } else { Style::default().fg(Color::White) },
                 ),
-                Span::raw(" "),
-                Span::styled(pad_left(&plus, PLUS_W), amount_style(file.added, true, is_selected)),
-                Span::raw(" "),
-                Span::styled(pad_left(&minus, MINUS_W), amount_style(file.deleted, false, is_selected)),
-                Span::raw(" "),
-                Span::styled(pad_left(status, STATUS_W), status_style),
-            ])
+            ];
+            spans.extend(stat_spans(
+                &format!("+{}", file.added),
+                &format!("-{}", file.deleted),
+                amount_style(file.added, true, is_selected),
+                amount_style(file.deleted, false, is_selected),
+                file.status.letter(),
+                status_style,
+            ));
+            Line::from(spans)
         }
     };
     f.render_widget(line, Rect { x: inner.x, y: inner.y + 2 + y, width: width as u16, height: 1 });
@@ -512,41 +818,38 @@ fn amount_style(n: u64, positive: bool, is_selected: bool) -> Style {
 
 // ----------------------------------------------------------------- diff
 
-fn render_diffview(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
-    // Clear the whole panel up front so every cell is re-evaluated when the
+fn render_diffview(f: &mut Frame, orig_area: Rect, changed_area: Rect, ctrl: &mut Controller<'_>) {
+    // Clear both panes up front so every cell is re-evaluated when the
     // selected file changes. This defends against ghost residue from the
     // previous file lingering at cells that a normal redraw would skip (e.g.
     // cells that trail a double-width glyph).
-    f.render_widget(Clear, area);
+    f.render_widget(Clear, orig_area);
+    f.render_widget(Clear, changed_area);
     let file = ctrl.diff_file.clone();
     let (orig_label, changed_label) = ctrl.side_labels();
-    let left = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
 
-    let scrollbar_needed = ctrl.diff_rows.len() > (area.height.saturating_sub(2)) as usize;
+    let scrollbar_needed = ctrl.diff_rows.len() > (changed_area.height.saturating_sub(2)) as usize;
 
     match file {
         Some(file) => {
             let orig_title = pane_title(&orig_label, &file);
             let changed_title = pane_title(&changed_label, &file);
             if file.is_binary {
-                render_placeholder_pane(f, left[0], &orig_title, "(binary file)", ctrl);
-                render_placeholder_pane(f, left[1], &changed_title, "(binary file)", ctrl);
+                render_placeholder_pane(f, orig_area, &orig_title, "(binary file)", ctrl);
+                render_placeholder_pane(f, changed_area, &changed_title, "(binary file)", ctrl);
                 return;
             }
             let orig_empty = ctrl.diff_rows.iter().all(|r| r.original.is_none());
             let changed_empty = ctrl.diff_rows.iter().all(|r| r.changed.is_none());
             if orig_empty {
-                render_placeholder_pane(f, left[0], &orig_title, "(no original content)", ctrl);
+                render_placeholder_pane(f, orig_area, &orig_title, "(no original content)", ctrl);
             } else {
-                render_diff_pane(f, left[0], &orig_title, true, ctrl);
+                render_diff_pane(f, orig_area, &orig_title, true, ctrl);
             }
             if changed_empty {
-                render_placeholder_pane(f, left[1], &changed_title, "(no changed content)", ctrl);
+                render_placeholder_pane(f, changed_area, &changed_title, "(no changed content)", ctrl);
             } else {
-                render_diff_pane(f, left[1], &changed_title, false, ctrl);
+                render_diff_pane(f, changed_area, &changed_title, false, ctrl);
             }
         }
         None => {
@@ -561,13 +864,29 @@ fn render_diffview(f: &mut Frame, area: Rect, ctrl: &mut Controller<'_>) {
             } else {
                 "(select a file)"
             };
-            render_placeholder_pane(f, left[0], &orig_label, msg, ctrl);
-            render_placeholder_pane(f, left[1], &changed_label, msg, ctrl);
+            render_placeholder_pane(f, orig_area, &orig_label, msg, ctrl);
+            render_placeholder_pane(f, changed_area, &changed_label, msg, ctrl);
         }
     }
 
     if scrollbar_needed {
-        render_scrollbar(f, left[1], ctrl);
+        render_scrollbar(f, changed_area, ctrl);
+    }
+}
+
+/// Bright vertical bar over a divider while it is hovered or dragged, so the
+/// resizable seam is discoverable.
+fn render_divider_highlight(f: &mut Frame, x: u16, y: u16, height: u16, dragging: bool) {
+    // Leave the pane's top/bottom border rows intact so rounded corners stay
+    // rounded; the highlight only spans the vertical edges.
+    if height <= 2 {
+        return;
+    }
+    let fg = if dragging { styles::ACTIVE_BORDER } else { styles::HINT };
+    let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
+    for i in 1..height - 1 {
+        let cell = Rect { x, y: y.saturating_add(i), width: 1, height: 1 };
+        f.render_widget(Paragraph::new("│").style(style), cell);
     }
 }
 
@@ -1317,6 +1636,7 @@ fn render_help(f: &mut Frame, area: Rect) {
             title: "通用",
             rows: &[
                 ("Tab", "切换焦点（文件列表 / 对比区）"),
+                ("鼠标拖动", "调整分隔线宽度（Shift+拖动选择文本）"),
                 ("4", "进入模式D（上次 commit 对比 / 选择 commit）"),
                 ("1 / 2 / 3 / 4", "切换比较模式 A/B/C/D"),
                 ("r", "刷新"),
@@ -1452,11 +1772,25 @@ fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
+/// Percentage of `area`'s width that lies left of screen column `x`, clamped
+/// to `[min, max]`. Used to turn a divider drag into a new pane ratio.
+fn pct_at(x: u16, area: Rect, min: u16, max: u16) -> u16 {
+    if area.width == 0 {
+        return max;
+    }
+    let rel = x.saturating_sub(area.x).min(area.width.saturating_sub(1));
+    let pct = ((rel as u32 * 100) / area.width as u32) as u16;
+    pct.clamp(min, max)
+}
+
 fn short_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
 fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     let w = UnicodeWidthStr::width(s);
     if w <= max {
         return s.to_string();
@@ -1524,21 +1858,19 @@ pub fn run<R: GitRunner>(
     terminal.hide_cursor()?;
 
     let result = (|| {
-        // Enable mouse reporting for clicks only (`?1000h`, SGR `?1006h`).
-        // crossterm's EnableMouseCapture also turns on button-motion and
-        // any-motion tracking, which makes the terminal swallow every mouse
-        // event and disables its native drag-selection, so nothing can be
-        // selected/copied with the mouse. Click-only still gives the app the
-        // click events it uses for panel focus, while terminals keep native
-        // selection (Shift + drag) available.
-        write!(std::io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
+        // Enable mouse reporting: clicks (`?1000h`), button-motion (`?1002h`,
+        // delivers drag events for the pane dividers), any-motion (`?1003h`,
+        // for hover highlight) and SGR coordinates (`?1006h`). Motion tracking
+        // means a plain drag goes to the app instead of selecting text; most
+        // terminals keep native selection available with Shift + drag.
+        write!(std::io::stdout(), "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")?;
         std::io::stdout().flush()?;
         event_loop(&mut terminal, &mut app)
     })();
 
     // restore terminal to its original state: leave raw mode and the alternate
     // screen so the shell prompt renders normally after quitting
-    let _ = write!(std::io::stdout(), "\x1b[?1000l\x1b[?1006l");
+    let _ = write!(std::io::stdout(), "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
     let _ = std::io::stdout().flush();
     disable_raw_mode()?;
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
@@ -1546,21 +1878,41 @@ pub fn run<R: GitRunner>(
 }
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App<'_>) -> Result<()> {
+    // With any-motion mouse tracking enabled, pointer motion produces a
+    // constant stream of events. Draw only when the last event actually
+    // changed state, so idle motion costs nothing.
+    let mut redraw = true;
     loop {
-        let nav_before = app.nav_key();
-        if app.take_full_redraw() {
-            // Force a full terminal redraw: clear the screen, empty both ratatui
-            // buffers, then draw. The next flush then writes every cell, so
-            // cells that trail a double-width glyph get physically cleared by
-            // the terminal instead of lingering with the previous file's content.
-            terminal.clear()?;
-            terminal.swap_buffers();
+        if redraw {
+            // advance the stat-column slide once per frame
+            app.tick();
+            let nav_before = app.nav_key();
+            if app.take_full_redraw() {
+                // Force a full terminal redraw: clear the screen, empty both ratatui
+                // buffers, then draw. The next flush then writes every cell, so
+                // cells that trail a double-width glyph get physically cleared by
+                // the terminal instead of lingering with the previous file's content.
+                terminal.clear()?;
+                terminal.swap_buffers();
+            }
+            terminal.draw(|f| app.render(f))?;
+            // Some renderers adjust navigation state (e.g. keeping the list cursor
+            // visible), which means the frame we just drew was one scroll position
+            // behind. Re-draw fully next frame so no wide glyph shifts are skipped.
+            app.sync_full_redraw(nav_before);
+            redraw = app.full_redraw_pending();
         }
-        terminal.draw(|f| app.render(f))?;
-        // Some renderers adjust navigation state (e.g. keeping the list cursor
-        // visible), which means the frame we just drew was one scroll position
-        // behind. Re-draw fully next frame so no wide glyph shifts are skipped.
-        app.sync_full_redraw(nav_before);
+        // shorter poll while the reveal animates; a slow poll otherwise so an
+        // idle app does not wake up constantly
+        let timeout = if app.is_animating() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(500)
+        };
+        if !crossterm::event::poll(timeout)? {
+            redraw |= app.is_animating();
+            continue;
+        }
         let event = crossterm::event::read()?;
         match event {
             Event::Key(key) => {
@@ -1571,8 +1923,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &
                     break;
                 }
                 app.handle_key(key);
+                redraw = true;
             }
-            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            Event::Mouse(mouse) => redraw |= app.handle_mouse(mouse),
+            Event::Resize(_, _) => redraw = true,
             _ => {}
         }
     }
@@ -1581,9 +1935,66 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &
 
 #[cfg(test)]
 mod width_check {
-    use super::rect_contains;
+    use super::{ListLayout, pct_at, rect_contains};
     use ratatui::layout::Rect;
     use unicode_width::UnicodeWidthStr;
+
+    fn used_width(cols: ListLayout) -> usize {
+        ListLayout::MARKER_W + cols.name + cols.reserved
+    }
+
+    #[test]
+    fn list_layout_reveals_stats_progressively() {
+        for w in [2usize, 3, 12, 20, 30, 31, 60] {
+            for reveal in [0.0f32, 0.2, 0.5, 0.8, 1.0] {
+                let cols = ListLayout::for_width(w, reveal);
+                // every frame must account for exactly the available width
+                assert_eq!(used_width(cols), w, "width {w} reveal {reveal} -> {cols:?}");
+                assert!(cols.stats_width() <= cols.reserved);
+            }
+        }
+        // hidden: no columns at all, name takes everything but the marker
+        let hidden = ListLayout::for_width(31, 0.0);
+        assert_eq!(hidden.reserved, 0);
+        assert_eq!(hidden.name, 29);
+        // full: all three segments, leaving the minimum filename width
+        let full = ListLayout::for_width(31, 1.0);
+        assert_eq!(full.reserved, ListLayout::RESERVED_MAX);
+        assert_eq!((full.plus_cols(), full.minus_cols(), full.status_cols()), (5, 5, 7));
+        assert_eq!(full.name, 12);
+        // mid-slide: only the segments that fully fit are drawn
+        let mid = ListLayout::for_width(60, 0.5);
+        assert_eq!(mid.reserved, 9); // 17 * 0.5 rounds to 9
+        assert_eq!((mid.plus_cols(), mid.minus_cols(), mid.status_cols()), (0, 0, 7));
+        // on a narrow pane the reserve is capped so the name stays readable
+        let capped = ListLayout::for_width(20, 1.0);
+        assert_eq!(capped.name, ListLayout::MIN_NAME_W);
+        assert_eq!(capped.reserved, 6);
+    }
+
+    #[test]
+    fn truncate_handles_zero_width() {
+        assert_eq!(super::truncate("hello.rs", 0), "");
+        assert_eq!(super::truncate("hello.rs", 3), "he…");
+    }
+
+    #[test]
+    fn pct_at_maps_columns_and_clamps() {
+        let area = Rect { x: 10, y: 0, width: 100, height: 10 };
+        assert_eq!(pct_at(10, area, 0, 100), 0);
+        assert_eq!(pct_at(40, area, 0, 100), 30);
+        assert_eq!(pct_at(109, area, 0, 100), 99);
+        // clamping keeps both panes visible
+        assert_eq!(pct_at(10, area, 15, 60), 15);
+        assert_eq!(pct_at(109, area, 15, 60), 60);
+        assert_eq!(pct_at(200, area, 15, 60), 60);
+    }
+
+    #[test]
+    fn pct_at_handles_zero_width() {
+        let area = Rect { x: 5, y: 0, width: 0, height: 0 };
+        assert_eq!(pct_at(5, area, 20, 80), 80);
+    }
 
     #[test]
     fn rect_contains_bounds() {

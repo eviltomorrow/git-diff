@@ -21,24 +21,23 @@ use crate::model::{ChangedFile, CommitEntry, ComparisonMode, Status};
 use crate::styles;
 use crate::tree::{SortMode, VisibleRow};
 
-/// Default share of the width given to the file list, in percent.
-const DEFAULT_LIST_PCT: u16 = 26;
+/// Fixed width of the file list in columns. The list is deliberately not
+/// resizable: only the diff panes' shared divider can be dragged, so this
+/// pane always keeps the same footprint.
+const LIST_WIDTH: u16 = 44;
+/// Never let the list squeeze the diff area below this many columns.
+const MIN_DIFF_WIDTH: u16 = 40;
+/// Keep at least this much of the list on very narrow terminals.
+const MIN_LIST_WIDTH: u16 = 10;
 /// Default share of the diff area given to the original (left) pane.
 const DEFAULT_DIFF_PCT: u16 = 50;
-/// Clamp ranges for the two draggable dividers, so a pane can never vanish.
-const LIST_MIN_PCT: u16 = 12;
-const LIST_MAX_PCT: u16 = 60;
+/// Clamp range for the draggable diff divider, so a pane can never vanish.
 const DIFF_MIN_PCT: u16 = 20;
 const DIFF_MAX_PCT: u16 = 80;
+/// Rows moved per mouse-wheel notch over the diff panes.
+const WHEEL_LINES: isize = 3;
 /// Per-frame step of the file-list stat-column reveal (~150ms at 60fps).
 const STATS_REVEAL_STEP: f32 = 0.12;
-
-/// Which divider a drag is moving.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DragTarget {
-    ListSplit,
-    DiffSplit,
-}
 
 /// Thin shell: owns the terminal and the pure [`Controller`]; rendering is
 /// read-only over controller state (viewports are synced via
@@ -49,18 +48,16 @@ pub struct App<'a> {
     /// mouse clicks onto the focused panel.
     list_rect: Rect,
     diff_rect: Rect,
-    /// Middle band holding both panels; the file-list divider spans it.
+    /// Middle band holding both panels; the diff divider spans it.
     panels_rect: Rect,
-    /// Absolute screen columns of the two draggable dividers, captured from
+    /// Absolute screen column of the draggable diff divider, captured from
     /// the last render so hit-testing matches what the user sees.
-    list_divider_x: u16,
     diff_divider_x: u16,
-    list_pct: u16,
     diff_pct: u16,
-    /// Divider under the pointer (drawn as a highlight) and the one currently
-    /// being dragged, if any.
-    hover: Option<DragTarget>,
-    drag: Option<DragTarget>,
+    /// Whether the pointer is over the diff divider (drawn as a highlight)
+    /// and whether it is currently being dragged.
+    hover: bool,
+    drag: bool,
     /// A drag changed a pane ratio at least once; on release the screen is
     /// cleared once if the panes contain wide glyphs (clearing on every drag
     /// step would flicker).
@@ -103,6 +100,7 @@ pub struct NavKey {
     collapsed: Vec<String>,
     sort: SortMode,
     filter: Option<String>,
+    sidebar_visible: bool,
     fold_unchanged: bool,
     hunk_idx: usize,
     hunk_count: usize,
@@ -127,12 +125,10 @@ impl<'a> App<'a> {
             list_rect: Rect::default(),
             diff_rect: Rect::default(),
             panels_rect: Rect::default(),
-            list_divider_x: 0,
             diff_divider_x: 0,
-            list_pct: DEFAULT_LIST_PCT,
             diff_pct: DEFAULT_DIFF_PCT,
-            hover: None,
-            drag: None,
+            hover: false,
+            drag: false,
             drag_resized: false,
             stats_visible: false,
             stats_reveal: 0.0,
@@ -165,6 +161,7 @@ impl<'a> App<'a> {
             collapsed,
             sort: c.sort,
             filter: c.filter.clone(),
+            sidebar_visible: c.sidebar_visible,
             fold_unchanged: c.fold_unchanged,
             hunk_idx: c.hunk_idx,
             hunk_count: c.hunk_count,
@@ -187,6 +184,11 @@ impl<'a> App<'a> {
         }
         // overlays cover the whole panel area -> always redraw fully
         if now.overlay != before.overlay {
+            self.full_redraw = true;
+            return;
+        }
+        // showing/hiding the sidebar moves every panel boundary
+        if now.sidebar_visible != before.sidebar_visible {
             self.full_redraw = true;
             return;
         }
@@ -275,10 +277,11 @@ impl<'a> App<'a> {
         &self.ctrl
     }
 
-    /// Clicking inside a panel focuses it (a Tab variant); pressing on a
-    /// divider and dragging resizes the panes. Returns `true` when the event
-    /// changed visible state, so the event loop can skip redrawing on plain
-    /// pointer motion.
+    /// Clicking inside a panel focuses it (a Tab variant); pressing on the
+    /// diff divider and dragging left/right resizes the two diff panes. The
+    /// file list keeps a fixed width and is never resized. Returns `true` when
+    /// the event changed visible state, so the event loop can skip redrawing
+    /// on plain pointer motion.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         // overlays own the screen; pane gestures underneath are meaningless
         if self.ctrl.overlay.is_some() {
@@ -288,18 +291,24 @@ impl<'a> App<'a> {
         let before_hover = self.hover;
         let before_drag = self.drag;
         let before_focus = self.ctrl.focus;
-        let before_list = self.list_pct;
         let before_diff = self.diff_pct;
+        let before_scroll = (
+            self.ctrl.diff_cursor,
+            self.ctrl.diff_vscroll,
+            self.ctrl.diff_hscroll,
+            self.ctrl.cursor,
+            self.ctrl.list_scroll,
+        );
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // a missed button-up (e.g. released outside the terminal)
                 // must not leave a stale drag active
-                self.drag = None;
+                self.drag = false;
                 self.drag_resized = false;
-                if let Some(target) = self.divider_at(mouse.column, mouse.row) {
-                    self.drag = Some(target);
-                    self.hover = Some(target);
+                if self.divider_at(mouse.column, mouse.row) {
+                    self.drag = true;
+                    self.hover = true;
                 } else {
                     let in_list = rect_contains(self.list_rect, mouse.column, mouse.row);
                     let in_diff = rect_contains(self.diff_rect, mouse.column, mouse.row);
@@ -311,13 +320,14 @@ impl<'a> App<'a> {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(target) = self.drag {
-                    self.apply_drag(target, mouse.column);
-                    self.hover = Some(target);
+                if self.drag {
+                    self.apply_drag(mouse.column);
+                    self.hover = true;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.drag.take().is_some() {
+                if self.drag {
+                    self.drag = false;
                     self.hover = self.divider_at(mouse.column, mouse.row);
                     // One clear after the final layout settles removes any
                     // cells left trailing double-width glyphs while dragging.
@@ -328,52 +338,77 @@ impl<'a> App<'a> {
                     }
                 }
             }
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {
+                let over_diff = rect_contains(self.diff_rect, mouse.column, mouse.row);
+                let over_list = rect_contains(self.list_rect, mouse.column, mouse.row);
+                if over_diff || over_list {
+                    let nav_before = self.nav_key();
+                    if over_diff {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => self.ctrl.scroll_diff(-WHEEL_LINES),
+                            MouseEventKind::ScrollDown => self.ctrl.scroll_diff(WHEEL_LINES),
+                            MouseEventKind::ScrollLeft => self.ctrl.scroll_diff_horizontal(-1),
+                            _ => self.ctrl.scroll_diff_horizontal(1),
+                        }
+                        self.ctrl.set_focus(Focus::Diff);
+                    } else {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => self.ctrl.scroll_list(-WHEEL_LINES),
+                            MouseEventKind::ScrollDown => self.ctrl.scroll_list(WHEEL_LINES),
+                            // a horizontal wheel over the list has no meaning
+                            _ => {}
+                        }
+                        self.ctrl.set_focus(Focus::FileList);
+                    }
+                    self.sync_full_redraw(nav_before);
+                }
+            }
             MouseEventKind::Moved => {
                 self.hover = self.divider_at(mouse.column, mouse.row);
             }
             _ => {}
         }
 
-        let resized = before_list != self.list_pct || before_diff != self.diff_pct;
+        let resized = before_diff != self.diff_pct;
         if resized {
             self.drag_resized = true;
         }
+        let scrolled = before_scroll
+            != (
+                self.ctrl.diff_cursor,
+                self.ctrl.diff_vscroll,
+                self.ctrl.diff_hscroll,
+                self.ctrl.cursor,
+                self.ctrl.list_scroll,
+            );
 
         before_hover != self.hover
             || before_drag != self.drag
             || before_focus != self.ctrl.focus
             || resized
+            || scrolled
     }
 
-    /// The divider under a screen position, widened by one column on either
-    /// side because a single-column target is hard to hit.
-    fn divider_at(&self, x: u16, y: u16) -> Option<DragTarget> {
+    /// Whether a screen position is on the diff divider, widened by one
+    /// column on either side because a single-column target is hard to hit.
+    /// The file-list edge is not a resize handle.
+    fn divider_at(&self, x: u16, y: u16) -> bool {
         if self.panels_rect.width == 0
             || y < self.panels_rect.y
             || y >= self.panels_rect.y.saturating_add(self.panels_rect.height)
         {
-            return None;
+            return false;
         }
-        if x.abs_diff(self.list_divider_x) <= 1 {
-            return Some(DragTarget::ListSplit);
-        }
-        if x.abs_diff(self.diff_divider_x) <= 1 {
-            return Some(DragTarget::DiffSplit);
-        }
-        None
+        x.abs_diff(self.diff_divider_x) <= 1
     }
 
-    /// Move a divider so it sits under the pointer column, clamped to the
-    /// pane's allowed share of the width.
-    fn apply_drag(&mut self, target: DragTarget, x: u16) {
-        match target {
-            DragTarget::ListSplit => {
-                self.list_pct = pct_at(x, self.panels_rect, LIST_MIN_PCT, LIST_MAX_PCT);
-            }
-            DragTarget::DiffSplit => {
-                self.diff_pct = pct_at(x, self.diff_rect, DIFF_MIN_PCT, DIFF_MAX_PCT);
-            }
-        }
+    /// Move the diff divider so it sits under the pointer column, clamped to
+    /// each pane's allowed share of the width.
+    fn apply_drag(&mut self, x: u16) {
+        self.diff_pct = pct_at(x, self.diff_rect, DIFF_MIN_PCT, DIFF_MAX_PCT);
     }
 
     /// Whether a full redraw was requested since the last one (without
@@ -440,9 +475,13 @@ impl<'a> App<'a> {
             .split(area);
 
         // sync viewports before drawing so navigation clamps use real sizes
+        // the file list is a fixed, non-resizable column that can be hidden
+        // entirely, in which case the diff takes the full width
+        let show_list = self.ctrl.sidebar_visible;
+        let list_w = if show_list { fixed_list_width(chunks[1].width) } else { 0 };
         let panels = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(self.list_pct), Constraint::Percentage(100 - self.list_pct)])
+            .constraints([Constraint::Length(list_w), Constraint::Min(0)])
             .split(chunks[1]);
         // the diff area is split again; both halves are passed to the renderer
         // so the draggable divider and hit-testing share one geometry
@@ -450,7 +489,11 @@ impl<'a> App<'a> {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(self.diff_pct), Constraint::Percentage(100 - self.diff_pct)])
             .split(panels[1]);
-        let list_height = panels[0].height.saturating_sub(2) as usize;
+        let list_height = if show_list {
+            panels[0].height.saturating_sub(2) as usize
+        } else {
+            0
+        };
         let diff_height = panels[1].height.saturating_sub(3) as usize;
         // horizontal scrolling is shared, so the narrower pane bounds it
         let diff_width = diff_cols[0]
@@ -473,22 +516,29 @@ impl<'a> App<'a> {
         self.panels_rect = chunks[1];
         self.list_rect = panels[0];
         self.diff_rect = panels[1];
-        self.list_divider_x = panels[0].x.saturating_add(panels[0].width);
         self.diff_divider_x = diff_cols[1].x;
         // keep the stat-column target in sync with the list's inner width
-        self.update_stats_visibility(panels[0].width.saturating_sub(2) as usize);
+        self.update_stats_visibility(if show_list {
+            panels[0].width.saturating_sub(2) as usize
+        } else {
+            0
+        });
         let reveal = self.stats_reveal;
 
         render_header(f, chunks[0], &self.ctrl);
-        render_filelist(f, panels[0], &mut self.ctrl, reveal);
+        if show_list {
+            render_filelist(f, panels[0], &mut self.ctrl, reveal);
+        }
         render_diffview(f, diff_cols[0], diff_cols[1], &mut self.ctrl);
         render_statusbar(f, chunks[2], &self.ctrl);
-        if let Some(target) = self.drag.or(self.hover) {
-            let (x, band) = match target {
-                DragTarget::ListSplit => (self.list_divider_x, self.panels_rect),
-                DragTarget::DiffSplit => (self.diff_divider_x, self.diff_rect),
-            };
-            render_divider_highlight(f, x, band.y, band.height, self.drag == Some(target));
+        if self.drag || self.hover {
+            render_divider_highlight(
+                f,
+                self.diff_divider_x,
+                self.diff_rect.y,
+                self.diff_rect.height,
+                self.drag,
+            );
         }
 
         match &self.ctrl.overlay {
@@ -1247,8 +1297,9 @@ fn render_statusbar(f: &mut Frame, area: Rect, ctrl: &Controller<'_>) {
         ));
         right.push(Span::styled("│ [Esc]结束", styles::key_style()));
     } else {
-        let hints: [(&str, &str); 11] = [
+        let hints: [(&str, &str); 12] = [
             ("Tab", "焦点"),
+            ("b", "列表"),
             ("1-4", "模式"),
             ("↑↓", "移动"),
             ("Pg", "翻页"),
@@ -1636,7 +1687,8 @@ fn render_help(f: &mut Frame, area: Rect) {
             title: "通用",
             rows: &[
                 ("Tab", "切换焦点（文件列表 / 对比区）"),
-                ("鼠标拖动", "调整分隔线宽度（Shift+拖动选择文本）"),
+                ("b", "显示 / 隐藏文件列表"),
+                ("鼠标拖动", "左右拖动对比区中线调整两栏宽度（Shift+拖动选择文本）"),
                 ("4", "进入模式D（上次 commit 对比 / 选择 commit）"),
                 ("1 / 2 / 3 / 4", "切换比较模式 A/B/C/D"),
                 ("r", "刷新"),
@@ -1647,6 +1699,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Group {
             title: "文件列表",
             rows: &[
+                ("滚轮", "上下移动光标"),
                 ("↑↓", "移动光标"),
                 ("Enter", "查看选中文件对比"),
                 ("→ / ←", "展开 / 折叠目录"),
@@ -1659,6 +1712,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Group {
             title: "对比区",
             rows: &[
+                ("滚轮", "上下滚动（横向滚轮左右滚动）"),
                 ("↑↓", "移动当前行"),
                 ("PgUp/PgDn", "按页滚动"),
                 ("→ / ←", "水平滚动"),
@@ -1770,6 +1824,13 @@ fn overlay_key(c: &Controller<'_>) -> u64 {
 /// bottom-right, matching ratatui's Rect semantics).
 fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+/// The file list's fixed width, reduced only when the terminal is too narrow
+/// to honour it without starving the diff area.
+fn fixed_list_width(total: u16) -> u16 {
+    let max_list = total.saturating_sub(MIN_DIFF_WIDTH).max(MIN_LIST_WIDTH);
+    LIST_WIDTH.min(max_list).min(total)
 }
 
 /// Percentage of `area`'s width that lies left of screen column `x`, clamped
@@ -1935,7 +1996,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &
 
 #[cfg(test)]
 mod width_check {
-    use super::{ListLayout, pct_at, rect_contains};
+    use super::{ListLayout, fixed_list_width, pct_at, rect_contains};
     use ratatui::layout::Rect;
     use unicode_width::UnicodeWidthStr;
 
@@ -1976,6 +2037,18 @@ mod width_check {
     fn truncate_handles_zero_width() {
         assert_eq!(super::truncate("hello.rs", 0), "");
         assert_eq!(super::truncate("hello.rs", 3), "he…");
+    }
+
+    #[test]
+    fn fixed_list_width_stays_constant_until_the_diff_needs_room() {
+        // large terminals: the list keeps its fixed width
+        assert_eq!(fixed_list_width(100), 44);
+        assert_eq!(fixed_list_width(200), 44);
+        // narrower than list + minimum diff: the list gives way
+        assert_eq!(fixed_list_width(60), 20);
+        assert_eq!(fixed_list_width(40), 10);
+        // degenerate terminal: still fits inside the available width
+        assert_eq!(fixed_list_width(5), 5);
     }
 
     #[test]

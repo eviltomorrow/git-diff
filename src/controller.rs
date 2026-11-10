@@ -113,6 +113,9 @@ pub struct Controller<'a> {
     pub ignore_whitespace: bool,
     /// Sibling ordering for the file list.
     pub sort: SortMode,
+    /// Whether the file-list sidebar is shown. The list keeps its selection
+    /// while hidden, so toggling it back restores the same file.
+    pub sidebar_visible: bool,
     pub overlay: Option<Overlay>,
     /// Full commit messages fetched for the commit picker preview, keyed by
     /// short hash, so moving through the list doesn't re-run git.
@@ -169,6 +172,7 @@ impl<'a> Controller<'a> {
             goto: None,
             ignore_whitespace: false,
             sort: SortMode::Path,
+            sidebar_visible: true,
             overlay: None,
             commit_messages: HashMap::new(),
             commit_preview_viewport: 0,
@@ -449,6 +453,7 @@ impl<'a> Controller<'a> {
                 self.search = Some(String::new());
             }
             (KeyCode::Char('s'), KeyModifiers::NONE) => self.cycle_sort(),
+            (KeyCode::Char('b'), KeyModifiers::NONE) => self.toggle_sidebar(),
             (KeyCode::Char('['), KeyModifiers::NONE) => self.collapse_all_dirs(),
             (KeyCode::Char(']'), KeyModifiers::NONE) => self.expand_all_dirs(),
             (KeyCode::Right, KeyModifiers::CONTROL) => self.scroll_horizontal(1),
@@ -664,10 +669,23 @@ impl<'a> Controller<'a> {
     }
 
     fn toggle_focus(&mut self) {
+        // a hidden file list has nothing to focus; keep keys on the diff
+        if !self.sidebar_visible {
+            self.focus = Focus::Diff;
+            return;
+        }
         self.focus = match self.focus {
             Focus::FileList => Focus::Diff,
             Focus::Diff => Focus::FileList,
         };
+    }
+
+    fn toggle_sidebar(&mut self) {
+        self.sidebar_visible = !self.sidebar_visible;
+        // hiding the list must not leave arrow keys driving an invisible cursor
+        if !self.sidebar_visible {
+            self.focus = Focus::Diff;
+        }
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
@@ -774,6 +792,23 @@ impl<'a> Controller<'a> {
         }
         self.keep_cursor_visible();
         self.sync_hunk_idx();
+    }
+
+    /// Mouse-wheel scrolling: move the diff cursor (the shared viewport
+    /// follows it) by `lines` rows, clamped to the diff content.
+    pub fn scroll_diff(&mut self, lines: isize) {
+        self.move_diff_cursor(lines);
+    }
+
+    /// Mouse-wheel horizontal scrolling, in 8-column steps like Ctrl+←/→.
+    pub fn scroll_diff_horizontal(&mut self, dir: isize) {
+        self.scroll_horizontal(dir);
+    }
+
+    /// Mouse-wheel scrolling over the file list: move the cursor by `rows`
+    /// entries (the diff follows the new selection).
+    pub fn scroll_list(&mut self, rows: isize) {
+        self.move_cursor(rows);
     }
 
     pub fn is_unchanged_row(&self, idx: usize) -> bool {
